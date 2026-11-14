@@ -44,6 +44,10 @@ def parse_open_request(prompt: str) -> OpenFileRequest | None:
         return None
     if not _OPEN_ACTION.search(prompt):
         return None
+    # URLs are opened by the explicit HTTPS link action, never interpreted
+    # as disk filenames extracted from a remote address.
+    if re.search(r"\b(?:https?://|www\.)", prompt, re.I):
+        return None
     result = _FILENAME.search(prompt)
     if not result:
         return None
