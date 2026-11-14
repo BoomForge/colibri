@@ -355,7 +355,7 @@ def execute_pc_plan(plan: PCPlan, *, approved: bool = False,
         raise PCActionError("PC control is available only in the Windows desktop app")
     registered = registered or {}
     windows = windows or visible_windows
-    folder_launcher = folder_launcher or os.startfile
+    folder_launcher = folder_launcher or (lambda value: os.startfile(value))
     app_launcher = app_launcher or (lambda exe: subprocess.Popen([exe], shell=False,
                                                                  stdin=subprocess.DEVNULL,
                                                                  stdout=subprocess.DEVNULL,
