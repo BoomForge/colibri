@@ -73,7 +73,7 @@ class Preset:
 
 
 PRESETS = (
-    Preset("research", "Research", RESEARCH_PROMPT, "qwen3"),
+    Preset("research", "Research", RESEARCH_PROMPT, "research"),
     Preset("webdev", "Web Development", WEB_DEVELOPMENT_PROMPT, "coder"),
     Preset("gamedev", "Game Development", GAME_DEVELOPMENT_PROMPT, "coder"),
 )
@@ -85,17 +85,19 @@ def suggested_installed_model(models_root: Path, family: str) -> str:
     if not models_root.is_dir():
         return ""
     available = discover_models(models_root)
-    if family == "coder":
-        matched = [p for p in available if
-                   "qwen2.5-coder-3b" in str(p).lower() or
-                   "qwen2_5-coder-3b" in str(p).lower()]
-    else:
-        matched = [p for p in available if
-                   "qwen3-4b" in str(p).lower() or
-                   "qwen3_4b" in str(p).lower()]
-    if not matched:
+    # This fork's bundled qwen36 engine registers model_type 'qwen3', but
+    # NOT Qwen2.5-Coder's 'qwen2'. Never silently select an incompatible
+    # model just because its filename includes 'coder'.
+    qwen3 = [p for p in available if "qwen3-4b" in str(p).lower()
+             or "qwen3_4b" in str(p).lower()]
+    if family == "research":
+        thinking = [p for p in qwen3 if "thinking" in str(p).lower()]
+        if thinking:
+            return str(thinking[0].relative_to(models_root))
+    if not qwen3:
         return ""
-    return str(matched[0].relative_to(models_root))
+    chosen = next((p for p in qwen3 if "instruct" in str(p).lower()), qwen3[0])
+    return str(chosen.relative_to(models_root))
 
 
 def ensure_specialists(db: sqlite3.Connection, models_root: Path) -> list[str]:
