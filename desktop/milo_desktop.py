@@ -37,6 +37,10 @@ from colibri.milo_core.vision import (
 from colibri.milo_core.windows_actions import (
     WindowsAction, available_actions, parse_action_request, execute_action,
 )
+from colibri.milo_core.pc_broker import (
+    PCActionError, PCPlan, parse_pc_request, execute_pc_plan, load_apps,
+    register_app, remove_app,
+)
 from colibri.milo_core.global_hotkey import GlobalQuickChatHotkey
 from colibri.milo_core.tool_activity import (
     init_activity, record_activity, list_activity, clear_activity,
@@ -124,6 +128,7 @@ DB_PATH = DATA_DIR / "memory.sqlite3"
 CONFIG_PATH = DATA_DIR / "settings" / "preferences.json"
 AVATARS = DATA_DIR / "avatars"
 DOCUMENTS = DATA_DIR / "documents"
+PC_APPS = DATA_DIR / "settings" / "pc_apps.json"
 ORIGINAL_ARCHIVES = DATA_DIR / "original_archives"
 BRAND_AVATAR = install_root() / "Assets" / "milo_profile.png"
 BRAND_ICON = install_root() / "Assets" / "Milo.ico"
@@ -349,6 +354,7 @@ class MiloDesktop:
             ("Find files", self.find_files_window, "files"),
             ("Organise files", self.organise_files_window, "files"),
             ("Windows tools", self.windows_tools_window, "files"),
+            ("PC control", self.pc_control_window, "files"),
             ("Ask SOL", self.sol_window, "sol"),
             ("Back up / Restore", self.backup_window, "backup"),
             ("Settings", self.settings_window, None),
@@ -1571,6 +1577,108 @@ class MiloDesktop:
             button.pack(fill="x", padx=24, pady=4)
         return panel
 
+    def pc_control_window(self):
+        """Owner-selected apps and deliberately scoped, one-time PC actions."""
+        panel = self._panel(
+            "PC control",
+            "Approved local actions. Every request shows a preview and asks "
+            "permission; no shell access or hidden computer control.")
+        examples = (
+            "Try asking Milo in chat:\n"
+            "  open notepad  ·  open downloads  ·  open https://example.org\n"
+            "  list files in documents  ·  list open windows\n"
+            "  switch to Notepad  ·  type \"Hello\" into Notepad\n"
+            "  rename \"old.txt\" to \"new.txt\" in downloads\n"
+            "  create note \"ideas.txt\" in documents with text \"First idea\"\n"
+            "Registered apps: add a local .exe below, then say 'open blender'.\n"
+            "File changes, application launches, window focus and typing always "
+            "require approval. No administrator or arbitrary script execution."
+        )
+        tk.Label(panel, text=examples, bg=PANEL, fg=MUTED,
+                 font=(FONT, 9), justify="left", anchor="w",
+                 wraplength=540).pack(fill="x", padx=22, pady=(15, 10))
+        tk.Label(panel, text="Your registered applications", bg=PANEL, fg=FG,
+                 font=(FONT, 10, "bold")).pack(anchor="w", padx=24, pady=(6, 4))
+        registry = tk.Listbox(
+            panel, height=7, bg=BG, fg=FG, selectbackground=EDGE,
+            activestyle="none", font=(FONT, 9))
+        registry.pack(fill="both", expand=True, padx=24, pady=(0, 8))
+        def refresh():
+            registry.delete(0, "end")
+            for app_name, target in sorted(load_apps(PC_APPS).items()):
+                registry.insert("end", app_name+"  ·  "+target)
+        def add():
+            selected = filedialog.askopenfilename(
+                title="Select an application you trust (Windows executable)",
+                filetypes=[("Applications", "*.exe")], parent=panel)
+            if not selected:
+                return
+            name = simpledialog.askstring(
+                "Application name", "Name to use in Milo chat "
+                "(for example: blender, obs, vroid):", parent=panel)
+            if not name:
+                return
+            try:
+                register_app(PC_APPS, Path(selected), name=name)
+            except (OSError, ValueError, PCActionError) as exc:
+                messagebox.showerror("PC app registration", str(exc)[:280],
+                                     parent=panel)
+                return
+            self._audit("pc_app_registration", "completed")
+            refresh()
+        def remove():
+            chosen = registry.curselection()
+            entries = sorted(load_apps(PC_APPS))
+            if not chosen or chosen[0] >= len(entries):
+                return
+            name = entries[chosen[0]]
+            if messagebox.askyesno(
+                    "Revoke registered application",
+                    "Remove '"+name+"' from Milo's launch list?\n\n"
+                    "The installed program will not be uninstalled.",
+                    parent=panel):
+                remove_app(PC_APPS, name)
+                self._audit("pc_app_registration", "revoked")
+                refresh()
+        controls = tk.Frame(panel, bg=PANEL)
+        controls.pack(fill="x", padx=24, pady=(0, 15))
+        new_button(controls, "Add local application", add,
+                   primary=True).pack(side="left")
+        new_button(controls, "Revoke selected", remove).pack(side="right")
+        refresh()
+        return panel
+
+    def _perform_pc_plan(self, plan: PCPlan, *, chat_context):
+        """Display the exact proposed operation; deny has no side effects."""
+        if self.busy:
+            messagebox.showinfo(
+                "Milo is responding", "Finish the current response first.",
+                parent=self.root)
+            return
+        if not messagebox.askyesno(
+                "Approve Milo PC action — "+plan.title,
+                plan.preview[:1250] +
+                "\n\nExecute this ONE action now? "
+                "This approval does not grant future access.",
+                parent=self.root):
+            self._audit("pc_"+plan.kind, "denied")
+            return
+        self._audit("pc_"+plan.kind, "approved")
+        chat_id, prompt, target_id, author_name, author_avatar, shared = chat_context
+        self._begin_tool_turn(
+            chat_id, prompt, target_id, author_name, author_avatar)
+        try:
+            outcome = execute_pc_plan(
+                plan, approved=True, registered=load_apps(PC_APPS))
+            state = "completed"
+        except (OSError, ValueError, PermissionError, PCActionError) as exc:
+            outcome = "I couldn't complete that PC action: "+str(exc)[:260]
+            state = "failed"
+        self._audit("pc_"+plan.kind, state)
+        self.events.put((
+            "windows_action_result", chat_id, prompt, outcome,
+            target_id, author_name, "", shared))
+
     def _perform_windows_action(self, action: WindowsAction, chat_context=None):
         if self.busy:
             messagebox.showinfo("Milo is responding",
@@ -1723,6 +1831,19 @@ class MiloDesktop:
                 chat_context=(self.current_chat, prompt, target_id,
                               author_name, author_avatar,
                               settings.kind == "room"))
+            return
+
+        # Local user-message commands are interpreted by a typed broker,
+        # NEVER from LLM output, imported documents, webpage or email content.
+        requested_pc = (
+            parse_pc_request(clean_prompt, registered=load_apps(PC_APPS))
+            if target_id == "milo" and module_enabled(DATA_DIR, "files")
+            else None)
+        if requested_pc is not None:
+            self._perform_pc_plan(
+                requested_pc, chat_context=(
+                    self.current_chat, prompt, target_id,
+                    author_name, author_avatar, settings.kind == "room"))
             return
 
         # A filename-specific "open" request uses deterministic local file
