@@ -80,7 +80,10 @@ Section "Install Milo" SEC_MAIN
     ; /S installer used by Windows CI/deployment never starts interactive Milo.
     ; Uninstall has its own section and never launches the program.
     IfSilent skip_launch
-    Exec '"$INSTDIR\\Milo.exe"'
+    ClearErrors
+    Exec '"$INSTDIR\Milo.exe"'
+    IfErrors 0 skip_launch
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Milo was installed, but Windows could not start it automatically. Launch Milo from the Start menu."
 skip_launch:
 SectionEnd
 
