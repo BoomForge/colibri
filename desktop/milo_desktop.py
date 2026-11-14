@@ -347,6 +347,27 @@ class MiloDesktop:
         else:
             self.advanced_controls.pack_forget()
 
+    def _show_composer_hint(self):
+        if not self.entry.get("1.0", "end-1c").strip():
+            self.entry.insert("1.0", self.entry_hint)
+            self.entry.configure(fg=MUTED)
+            self.entry_placeholder = True
+
+    def _composer_focus_in(self, _event):
+        if self.entry_placeholder:
+            self.entry.delete("1.0", "end")
+            self.entry.configure(fg=FG)
+            self.entry_placeholder = False
+
+    def _composer_focus_out(self, _event):
+        if not self.entry.get("1.0", "end-1c").strip():
+            self._show_composer_hint()
+
+    def _composer_select_all(self, _event):
+        if not self.entry_placeholder:
+            self.entry.tag_add("sel", "1.0", "end-1c")
+        return "break"
+
     def _enter_key(self, event):
         if event.state & 0x1:  # Shift+Enter
             return None
@@ -358,24 +379,17 @@ class MiloDesktop:
         self.send_button.configure(state="disabled" if busy else "normal")
         self.stop_button.configure(state="normal" if busy else "disabled")
 
-    def _append(self, text: str, tag: str = "body"):
-        self.transcript.configure(state="normal")
-        self.transcript.insert("end", text, tag)
-        self.transcript.configure(state="disabled")
-        self.transcript.see("end")
+    def _append(self, text: str, tag: str = "notice"):
+        # Legacy helper retained only for non-message status notices.
+        if text.strip():
+            self.chat_view.notice(text.strip())
 
     def _display_turn(self, role: str, text: str, timestamp: str = ""):
-        display_name = (self.config["user_name"] if role == "user"
-                        else self.config["milo_name"])
-        self._append("\n" + display_name + "  ", role + "_name")
-        if timestamp:
-            self._append(timestamp[:16].replace("T", " "), "time")
-        self._append("\n" + text + "\n", "body")
+        return self.chat_view.add_message(role, text, timestamp)
 
     def _load_chat(self):
-        self.transcript.configure(state="normal")
-        self.transcript.delete("1.0", "end")
-        self.transcript.configure(state="disabled")
+        self.chat_view.clear()
+        self.pending_message = None
         rows = self.db.db.execute(
             "SELECT role, content, created_at FROM conversations WHERE chat_id=? "
             "ORDER BY id LIMIT 1000", (self.current_chat,)
@@ -407,23 +421,16 @@ class MiloDesktop:
         self.chats.extend((chat_id, title) for chat_id, title in rows)
         if self.current_chat not in {x[0] for x in self.chats}:
             self.chats.insert(0, (self.current_chat, "New conversation"))
-        self.chat_list.delete(0, "end")
-        selected_index = 0
-        for index, (chat_id, title) in enumerate(self.chats):
-            self.chat_list.insert("end", "#  " + title.replace("\n", " "))
-            if chat_id == self.current_chat:
-                selected_index = index
-        self.chat_list.selection_set(selected_index)
+        self.chat_list.set_chats(self.chats, self.current_chat)
 
-    def _select_chat(self, _event):
-        selection = self.chat_list.curselection()
-        if self.busy or not selection:
+    def _select_chat(self, selected):
+        if self.busy:
             return
-        selected = self.chats[selection[0]][0]
         if selected != self.current_chat:
             self.current_chat = selected
             self.config["current_chat"] = selected
             save_config(self.config)
+            self._refresh_chat_list()
             self._load_chat()
 
     def new_chat(self):
@@ -439,7 +446,8 @@ class MiloDesktop:
     def send(self):
         if self.busy:
             return
-        prompt = self.entry.get("1.0", "end-1c").strip()
+        prompt = ("" if self.entry_placeholder
+                  else self.entry.get("1.0", "end-1c").strip())
         if not prompt:
             return
         if len(prompt) > 20000:
@@ -463,10 +471,12 @@ class MiloDesktop:
             return
         chat_id = self.current_chat
         self.entry.delete("1.0", "end")
-        self._display_turn("user", prompt, datetime.now().isoformat())
-        self._append("\n" + self.config["milo_name"] + "  ", "milo_name")
-        self._append(datetime.now().strftime("%Y-%m-%d %H:%M"), "time")
-        self._append("\n")
+        self.entry_placeholder = False
+        self.entry.configure(fg=FG)
+        sent_at = datetime.now().astimezone()
+        self._display_turn("user", prompt, sent_at)
+        self.pending_message = self.chat_view.add_message(
+            "assistant", "", datetime.now().astimezone(), streaming=True)
         self.cancel.clear()
         self._set_busy(True)
 
@@ -656,18 +666,25 @@ class MiloDesktop:
                 elif kind == "model_import_error":
                     messagebox.showerror("Model import", event[1])
                 elif kind == "chunk":
-                    if event[1] == self.current_chat:
-                        self._append(event[2], "body")
+                    if event[1] == self.current_chat and self.pending_message is not None:
+                        self.chat_view.append_to(self.pending_message, event[2])
                 elif kind == "done":
-                    if event[1] == self.current_chat:
-                        self._append("\n")
+                    if event[1] == self.current_chat and self.pending_message is not None:
+                        self.chat_view.finish(self.pending_message)
+                        self.pending_message = None
                     self._set_busy(False)
                     self._refresh_chat_list()
                 elif kind == "cancelled":
-                    self._append("\n[Response cancelled; not saved]\n", "notice")
+                    if self.pending_message is not None:
+                        self.chat_view.finish(
+                            self.pending_message, status="Response cancelled · not saved")
+                        self.pending_message = None
                     self._set_busy(False)
                 elif kind == "error":
-                    self._append("\n[Response incomplete; not saved]\n", "notice")
+                    if self.pending_message is not None:
+                        self.chat_view.finish(
+                            self.pending_message, status="Response incomplete · not saved")
+                        self.pending_message = None
                     self._set_busy(False)
                     messagebox.showerror("Milo connection", event[2])
                 elif kind == "connection":
@@ -726,12 +743,20 @@ class MiloDesktop:
         self.milo_title.configure(text=self.config["milo_name"])
         has_persona = loaded_persona(self.db.db) is not None
         self.persona_status_label.configure(
-            text=("● Historical personality imported"
-                  if has_persona else "○ Temporary personality"),
-            fg="#9fdfb4" if has_persona else ORANGE,
+            text=("RESTORED PROFILE" if has_persona else "BASE PROFILE"),
+            fg=COLORS["green"] if has_persona else VIOLET,
         )
         self._avatar(self.user_icon, "avatar_user", self.config["user_name"])
         self._avatar(self.milo_icon, "avatar_milo", self.config["milo_name"])
+        user_path = AVATARS / self.config["avatar_user"] if self.config.get("avatar_user") else None
+        milo_path = (AVATARS / self.config["avatar_milo"]
+                     if self.config.get("avatar_milo") else BRAND_AVATAR)
+        self.chat_view.identity(
+            user_name=self.config["user_name"],
+            milo_name=self.config["milo_name"],
+            user_avatar=user_path,
+            milo_avatar=milo_path)
+        self.chat_list.set_avatar(milo_path)
 
     def updates_modules_window(self):
         panel = self._panel(
