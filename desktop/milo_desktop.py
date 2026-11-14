@@ -2474,7 +2474,9 @@ def ui_self_test() -> int:
             assert app.bot_side.winfo_exists(), "bot roster sidebar missing"
             assert app.model_selector.winfo_exists(), "per-chat model selector missing"
             app._edit_bot_window()  # create-bot editor must open
-            mark("after tool windows and bot editor")
+            app.documents_window("core")  # local Core Knowledge panel must open
+            assert app.core_docs_button.winfo_exists(), "Core Knowledge button missing"
+            mark("after tool windows, bot editor and documents")
             app.chat_view.clear()
             mark("after clear")
             at = datetime.now().astimezone()
