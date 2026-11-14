@@ -47,6 +47,18 @@ KNOWN_APPS = {
     "file explorer": "explorer.exe",
     "explorer": "explorer.exe",
 }
+def _trusted_builtin(name: str) -> str:
+    exe = KNOWN_APPS[name]
+    if sys.platform != "win32":
+        return exe  # Synthetic CI never launches the program itself.
+    winroot = Path(os.environ.get("SystemRoot") or os.environ.get("WINDIR") or "C:\\Windows")
+    location = (winroot / "explorer.exe" if exe == "explorer.exe"
+                else winroot / "System32" / exe)
+    if not location.is_file() or location.is_symlink():
+        raise PCActionError("The trusted Windows app is unavailable: "+exe)
+    return str(location)
+
+
 FOLDERS = frozenset(("desktop", "documents", "downloads", "pictures"))
 ASSET_TYPES = frozenset((
     ".txt", ".md", ".markdown", ".json", ".csv", ".pdf", ".docx",
@@ -156,7 +168,7 @@ def parse_pc_request(message: str, *, registered: dict[str, str] | None = None) 
         app = _app_name(m.group(1), registered)
         if app:
             name, origin = app
-            exe = KNOWN_APPS.get(name) if origin == "builtin" else registered[name]
+            exe = _trusted_builtin(name) if origin == "builtin" else registered[name]
             return PCPlan("launch_app", "Launch "+name.title(),
                           "Launch the approved "+origin+" application:\n"+str(exe), (name, origin, str(exe)))
 
@@ -422,7 +434,7 @@ def execute_pc_plan(plan: PCPlan, *, approved: bool = False,
     kind = plan.kind
     if kind == "launch_app":
         name, origin, expected = plan.args
-        current = (KNOWN_APPS.get(name) if origin == "builtin" else registered.get(name))
+        current = (_trusted_builtin(name) if origin == "builtin" else registered.get(name))
         if not current or current != expected:
             raise PCActionError("Application permission or location changed since preview")
         if origin == "registered":
