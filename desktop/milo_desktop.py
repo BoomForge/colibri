@@ -27,6 +27,10 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
 from colibri.milo_core.filesystem import find_files_by_prefix
+from colibri.milo_core.local_engine import (
+    LocalEngine, EngineStartupError, chosen_model, discover_models,
+    install_root, managed_models_root, model_valid,
+)
 from colibri.milo_core.legacy_archive import (
     LegacyArchiveError, import_legacy_archive, inspect_legacy_archive,
     loaded_persona,
@@ -62,6 +66,8 @@ DEFAULTS = {
     "avatar_milo": "",
     "current_chat": "main",
     "model_directory": "",
+    "model_location": "",
+    "backend": "vulkan",
 }
 
 
@@ -142,6 +148,14 @@ class MiloDesktop:
         AVATARS.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         self.config = load_config()
+        self.install_root = install_root()
+        self.models_root = managed_models_root(self.install_root)
+        self.engine = LocalEngine(self.install_root, log_folder=DATA_DIR / "logs")
+        self.active_base_url = self.config["base_url"]
+        self.engine_starting = False
+        self.model_ready = False
+        # All managed model weights live under the named Models directory.
+        self.config["model_directory"] = str(self.models_root)
         self.db = LocalMemoryStore(DB_PATH)
         self.events: queue.Queue[tuple] = queue.Queue()
         self.busy = False
@@ -153,6 +167,7 @@ class MiloDesktop:
         self._refresh_chat_list()
         self._load_chat()
         self._refresh_profile()
+        self._autoselect_local_model()
         self.check_connection()
         self.root.after(70, self._pump)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
@@ -186,6 +201,7 @@ class MiloDesktop:
         tools = tk.Frame(self.side, bg=SIDEBAR)
         tools.pack(fill="x", padx=12, pady=12)
         for caption, action in [
+            ("Models", self.models_window),
             ("Restore Milo personality", self.restore_milo_personality),
             ("Memory", self.memory_window),
             ("Find files", self.find_files_window),
@@ -364,13 +380,18 @@ class MiloDesktop:
             messagebox.showerror("Message too long", "Keep messages below 20,000 characters.")
             return
         model = self.config.get("model", "")
+        if self.config.get("model_location") and not self.model_ready:
+            messagebox.showinfo("Loading model",
+                "The local model is not ready yet. Check the status above, "
+                "or open Models to change it.")
+            return
         if not model:
             messagebox.showinfo("Connect a model",
                 "Milo needs a local Colibri model. Start Colibri and select a model in Settings.")
             self.check_connection()
             return
         try:
-            LocalOpenAIProvider(model=model, base_url=self.config["base_url"])
+            LocalOpenAIProvider(model=model, base_url=self.active_base_url)
         except (ValueError, TypeError) as exc:
             messagebox.showerror("Invalid model settings", str(exc))
             return
@@ -387,7 +408,7 @@ class MiloDesktop:
             try:
                 with LocalMemoryStore(DB_PATH) as store:
                     provider = LocalOpenAIProvider(
-                        model=model, base_url=self.config["base_url"]
+                        model=model, base_url=self.active_base_url
                     )
                     conversation = MiloConversation(
                         provider, store,
@@ -416,9 +437,30 @@ class MiloDesktop:
         if self.busy:
             self.cancel.set()
 
+    def _autoselect_local_model(self):
+        selected = chosen_model(
+            self.models_root, self.config.get("model_location", ""))
+        if selected is not None:
+            return
+        found = discover_models(self.models_root)
+        if len(found) == 1:
+            self.config["model_location"] = str(
+                found[0].relative_to(self.models_root))
+            save_config(self.config)
+
     def check_connection(self):
+        selected = chosen_model(
+            self.models_root, self.config.get("model_location", ""))
+        if selected is not None:
+            self._launch_managed_model(selected)
+            return
+        self.active_base_url = self.config["base_url"]
+        self.model_ready = False
+        self.connection_label.configure(
+            text="No bundled model selected  •  Open Models", fg=ORANGE)
+        # Preserve a previously configured local Colibri server as an optional
+        # fallback, but never start it or send prompts to a remote endpoint.
         base = self.config["base_url"]
-        self.connection_label.configure(text="Checking local model...", fg=MUTED)
         def worker():
             try:
                 models = list_models(base)
@@ -427,12 +469,68 @@ class MiloDesktop:
                 self.events.put(("connection", False, []))
         threading.Thread(target=worker, daemon=True).start()
 
+    def _launch_managed_model(self, selected: Path):
+        if self.engine_starting or self.busy:
+            return
+        self.engine_starting = True
+        self.model_ready = False
+        self.connection_label.configure(
+            text="Loading bundled Colibri engine  •  " + selected.name,
+            fg=ORANGE)
+        backend = self.config.get("backend", "vulkan")
+        def worker():
+            try:
+                # A model switch shuts down the previously OWNED engine, never
+                # a separately installed external Colibri service.
+                if self.engine.process is not None:
+                    self.engine.stop()
+                endpoint = self.engine.start(selected, backend=backend)
+                self.engine.await_ready()
+                models = list_models(endpoint)
+                if not models:
+                    raise EngineStartupError("model loaded but chat API has no chat-capable models")
+                self.events.put(("managed_ready", endpoint, models))
+            except Exception as exc:
+                self.engine.stop()
+                self.events.put(("engine_error", str(exc)[:400]))
+        threading.Thread(target=worker, name="milo-engine-launch", daemon=True).start()
+
     def _pump(self):
         try:
             while True:
                 event = self.events.get_nowait()
                 kind = event[0]
-                if kind == "chunk":
+                if kind == "managed_ready":
+                    self.engine_starting = False
+                    self.active_base_url = event[1]
+                    self.models = event[2]
+                    if self.config.get("model") not in self.models:
+                        self.config["model"] = self.models[0]
+                        save_config(self.config)
+                    self.model_ready = True
+                    self.connection_label.configure(
+                        text="● Bundled Colibri  •  " + self.config["model"],
+                        fg="#9fdfb4")
+                elif kind == "engine_error":
+                    self.engine_starting = False
+                    self.model_ready = False
+                    self.connection_label.configure(
+                        text="● Colibri startup failed  •  Open Models", fg=ORANGE)
+                    messagebox.showerror(
+                        "Colibri startup",
+                        event[1] + "\n\nSee %LOCALAPPDATA%\\Milo\\logs\\colibri-service.log")
+                elif kind == "model_imported":
+                    relative = event[1]
+                    self.config["model_location"] = relative
+                    save_config(self.config)
+                    messagebox.showinfo(
+                        "Model installed",
+                        "Copied to " + str(self.models_root / relative) +
+                        "\n\nStarting the bundled Colibri service.")
+                    self.check_connection()
+                elif kind == "model_import_error":
+                    messagebox.showerror("Model import", event[1])
+                elif kind == "chunk":
                     if event[1] == self.current_chat:
                         self._append(event[2], "body")
                 elif kind == "done":
@@ -450,18 +548,21 @@ class MiloDesktop:
                 elif kind == "connection":
                     connected, models = event[1:]
                     self.models = models
-                    if connected:
-                        if not self.config.get("model") and models:
-                            self.config["model"] = models[0]
-                            save_config(self.config)
-                        chosen = self.config.get("model", "")
-                        self.connection_label.configure(
-                            text="● Connected  •  " + (chosen or "Model not selected"),
-                            fg="#9fdfb4")
-                    else:
-                        self.connection_label.configure(
-                            text="● Local Colibri offline  •  Start the model server",
-                            fg=ORANGE)
+                    # Ignore external-probe results if a managed model has
+                    # already been started during the asynchronous request.
+                    if not self.config.get("model_location") and not self.engine_starting:
+                        self.models = models
+                        if connected:
+                            if self.config.get("model") not in models and models:
+                                self.config["model"] = models[0]
+                                save_config(self.config)
+                            self.model_ready = bool(models)
+                            self.connection_label.configure(
+                                text="● Existing local service  •  " +
+                                     (self.config.get("model") or "No model"), fg="#9fdfb4")
+                        else:
+                            self.connection_label.configure(
+                                text="● No model installed  •  Open Models", fg=ORANGE)
                 elif kind == "backup_ok":
                     messagebox.showinfo("Milo backup", event[1])
                 elif kind == "backup_error":
@@ -913,6 +1014,7 @@ class MiloDesktop:
 
     def _close(self):
         self.cancel.set()
+        self.engine.stop()
         try:
             self.db.close()
         except Exception:
