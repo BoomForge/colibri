@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 import tempfile
 from pathlib import Path
 import unittest
@@ -14,9 +15,10 @@ class PortableBackupTests(unittest.TestCase):
 
     def make_sources(self, root: Path):
         memory = root / "milo.sqlite3"
-        with sqlite3.connect(memory) as db:
+        with closing(sqlite3.connect(memory)) as db:
             db.execute("CREATE TABLE notes(text TEXT)")
             db.execute("INSERT INTO notes VALUES ('synthetic private memory')")
+            db.commit()
         settings = root / "settings"
         settings.mkdir()
         (settings / "config.json").write_text('{"theme":"dark"}', encoding="utf-8")
@@ -41,7 +43,7 @@ class PortableBackupTests(unittest.TestCase):
                              b"synthetic model weights")
             self.assertEqual((restored / "settings" / "config.json").read_text(),
                              '{"theme":"dark"}')
-            with sqlite3.connect(restored / "data" / "memory.sqlite3") as db:
+            with closing(sqlite3.connect(restored / "data" / "memory.sqlite3")) as db:
                 self.assertEqual(db.execute("SELECT text FROM notes").fetchone()[0],
                                  "synthetic private memory")
 
