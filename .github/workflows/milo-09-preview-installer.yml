@@ -93,6 +93,22 @@ jobs:
           New-Item -ItemType Directory -Path "dist/Milo/Assets" -Force | Out-Null
           Copy-Item "desktop/assets/milo_profile.png" "dist/Milo/Assets/milo_profile.png"
           Copy-Item "desktop/assets/Milo.ico" "dist/Milo/Assets/Milo.ico"
+          New-Item -ItemType Directory -Path "dist/Milo/Assets/specialists" -Force | Out-Null
+          $avatars = @{
+            "sage"="c08d72d51cf77488718aa67ec567de627355446bfd6fc1875707975f2daedad7"
+            "nova"="89efb1ae36af8a4a9cbe63fbaf457ef9886039df643c81ecfa118cb5858fe717"
+            "forge"="5df0da47992d98a0409cb578eea7b0c7372ab9625f2dd31b42b3879215ee8290"
+          }
+          foreach ($id in $avatars.Keys) {
+            $src = "desktop/assets/specialists/$id.webp"
+            if (!(Test-Path $src)) { throw "Missing $id avatar" }
+            $digest = (Get-FileHash -Algorithm SHA256 $src).Hash.ToLowerInvariant()
+            if ($digest -ne $avatars[$id]) { throw "Source avatar hash mismatch: $id" }
+            Copy-Item $src "dist/Milo/Assets/specialists/$id.webp"
+            if (!(Test-Path "dist/Milo/Assets/specialists/$id.webp")) {
+              throw "Bundled $id avatar missing"
+            }
+          }
           @(
             "Runtime engines built from fork commit 449ecba1eeb954816de0eb6fc207fdc7cb1027ad",
             "Current Milo application commit: $env:GITHUB_SHA"
@@ -100,6 +116,11 @@ jobs:
       - name: Test both GUI and embedded runtime in standalone Windows binary
         shell: pwsh
         run: |
+          foreach ($id in @("sage", "nova", "forge")) {
+            if (!(Test-Path "dist/Milo/Assets/specialists/$id.webp")) {
+              throw "Installer stage omitted specialist portrait $id"
+            }
+          }
           $exe = (Resolve-Path "dist/Milo/Milo.exe").Path
           foreach ($arg in @("--self-test", "--embedded-self-test", "--ui-self-test")) {
             Write-Host "Testing bundled Milo $arg"
@@ -135,6 +156,12 @@ jobs:
           $installed = Join-Path $env:LOCALAPPDATA "Programs/Milo"
           $installedExe = Join-Path $installed "Milo.exe"
           if (!(Test-Path $installedExe)) { throw "Milo.exe missing from installation" }
+          foreach ($id in @("sage", "nova", "forge")) {
+            $portrait = Join-Path $installed "Assets/specialists/$id.webp"
+            if (!(Test-Path $portrait)) {
+              throw "Installed Milo missing $id portrait"
+            }
+          }
           $modelTest = Join-Path $installed "Models/preserve-user-models.txt"
           Set-Content $modelTest "Leave my checkpoints in place" -Encoding UTF8
           $second = Start-Process -FilePath $exe -ArgumentList "/S" -Wait -PassThru
