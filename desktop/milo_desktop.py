@@ -1629,6 +1629,20 @@ def ui_self_test() -> int:
         app.toggle_advanced()
         models_panel = app.models_window()
         updates_panel = app.updates_modules_window()
+        # Exercise the real compact transcript and streaming path without
+        # touching the owner's database or sending any model requests.
+        app.chat_view.clear()
+        at = datetime.now().astimezone()
+        first = app.chat_view.add_message("user", "First UI test message", at)
+        second = app.chat_view.add_message("user", "Grouped follow-up", at)
+        reply = app.chat_view.add_message("assistant", "", at, streaming=True)
+        app.chat_view.append_to(reply, "Hello from the compact Milo chat")
+        app.chat_view.finish(reply)
+        assert second["grouped"], "consecutive messages should group"
+        assert not reply["grouped"], "different authors must show headers"
+        assert len(app.chat_view.messages) == 3
+        assert reply["content"] == "Hello from the compact Milo chat"
+        assert app.entry_placeholder, "empty composer should show its hint"
         root.update_idletasks()
         root.update()
         for child in list(root.winfo_children()):
