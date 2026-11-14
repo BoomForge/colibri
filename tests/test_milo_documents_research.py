@@ -14,7 +14,7 @@ from colibri.milo_core.documents import (
 from colibri.milo_core.web_research import (
     ResearchError, WebSource, parse_rss, query_for_research, source_context,
     source_footer, wants_research, web_enabled, set_web_enabled,
-    _safe_url,
+    _safe_url, search_results_reply,
 )
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
 from colibri.milo_core.store import LocalMemoryStore
@@ -87,6 +87,21 @@ class DocumentAndResearchTests(unittest.TestCase):
         self.assertFalse(wants_research("this is a website I visited"))
         with self.assertRaises(ResearchError):
             query_for_research("Give me coding advice")
+
+    def test_user_speech_web_search_is_explicit_and_grounded(self):
+        phrase = "search for UFO online for me please"
+        self.assertTrue(wants_research(phrase))
+        self.assertEqual(query_for_research(phrase), "UFO")
+        self.assertFalse(wants_research("Can you list the Downloads folder?"))
+        self.assertFalse(wants_research("Can you open milo_icon_alpha_cleaned.png?"))
+        from colibri.milo_core.web_research import WebSource
+        result = search_results_reply(
+            "UFO", [WebSource(
+                "Verified test article", "https://example.org/ufo",
+                "A real source snippet, not an invented Milo summary")])
+        self.assertIn("https://example.org/ufo", result)
+        self.assertIn("Search snippet only", result)
+        self.assertIn("not independently verified", result)
 
     def test_bot_web_is_opt_in_and_stored_per_bot(self):
         self.assertFalse(web_enabled(self.store.db, "code"))
