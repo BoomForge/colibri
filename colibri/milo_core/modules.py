@@ -30,6 +30,7 @@ BUILTINS = {
     "models": ("Models", "Local model selection and GGUF import", True),
     "memory": ("Memory", "Approved memories and original personality recovery", True),
     "files": ("File search", "Deterministic filename tools", True),
+    "vision": ("Vision", "Optional local image understanding (owner approval)", True),
     "sol": ("SOL consultation", "Permission-gated manual second opinions", True),
     "backup": ("Backup & restore", "Encrypted portable backups", True),
 }
