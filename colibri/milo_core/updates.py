@@ -17,12 +17,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-CURRENT_VERSION = "0.5.0"
+CURRENT_VERSION = "0.6.0"
 REPOSITORY = "BoomForge/colibri"
 RELEASES_API = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
 MAX_INSTALLER = 500 * 1024 * 1024
 MAX_MODULE = 70 * 1024 * 1024
-UA = "Milo-Personal-Assistant-Updater/0.5"
+UA = "Milo-Personal-Assistant-Updater/0.6"
 _SEMVER = re.compile(r"^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$")
 _SAFE_ASSET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,120}$")
 
