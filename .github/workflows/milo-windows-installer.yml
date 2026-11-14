@@ -123,11 +123,11 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "NSIS install failed" }
           }
           & $compiler /V3 "desktop/install/Milo.nsi"
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path "Milo-Setup-0.3.0.exe")) { throw "NSIS build failed" }
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path "Milo-Setup-0.4.0.exe")) { throw "NSIS build failed" }
       - name: Test real installer and upgrade preserving models
         shell: pwsh
         run: |
-          $exe = (Resolve-Path "Milo-Setup-0.3.0.exe").Path
+          $exe = (Resolve-Path "Milo-Setup-0.4.0.exe").Path
           $first = Start-Process -FilePath $exe -ArgumentList "/S" -Wait -PassThru
           if ($first.ExitCode -ne 0) { throw "Installer returned $($first.ExitCode)" }
           $installed = Join-Path $env:LOCALAPPDATA "Programs/Milo"
@@ -165,9 +165,9 @@ jobs:
       - name: Upload actual installer and independently updateable feature package
         uses: actions/upload-artifact@v4
         with:
-          name: Milo-Installer-0.3.0
+          name: Milo-Installer-0.4.0
           path: |
-            Milo-Setup-0.3.0.exe
+            Milo-Setup-0.4.0.exe
             milo-module-system_info-0.1.0.zip
             milo-modules.json
           retention-days: 30
@@ -184,7 +184,7 @@ jobs:
             Write-Host "Skipping stale build; latest branch head is $tipSha"
             exit 0
           }
-          gh release view "milo-v0.3.0" --repo BoomForge/colibri 2>$null | Out-Null
+          gh release view "milo-v0.4.0" --repo BoomForge/colibri 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) { Write-Host "Version already published"; exit 0 }
-          gh release create "milo-v0.3.0" "Milo-Setup-0.3.0.exe" "milo-module-system_info-0.1.0.zip" "milo-modules.json" --repo BoomForge/colibri --target "$env:GITHUB_SHA" --prerelease --title "Milo 0.3.0 Windows Installer" --notes "Milo 0.3.0 UI polish: compact avatar-led Discord-inspired messages, grouped replies, readable timestamps, profile tags, tighter DM list, refined header and composer. Keeps bundled Colibri, GGUF import, local memory, modular updates and per-user installer. Unsigned preview. No models or private chat data bundled."
+          gh release create "milo-v0.4.0" "Milo-Setup-0.4.0.exe" "milo-module-system_info-0.1.0.zip" "milo-modules.json" --repo BoomForge/colibri --target "$env:GITHUB_SHA" --prerelease --title "Milo 0.4.0 Windows Installer" --notes "Milo 0.4.0: read-only Downloads/Documents/Desktop file listings directly in chat, selectable message text, formatted copyable code blocks, whole-conversation copy, and optional explicitly approved Qwen3-4B-Instruct-2507 abliterated Q4_K_M download with SHA-256 verification. Colibri, personality and local data remain intact. Unsigned preview; no private data or model weights bundled."
           if ($LASTEXITCODE -ne 0) { Write-Warning "Release publishing unavailable; CI installer remains available." }
