@@ -2229,12 +2229,17 @@ class MiloDesktop:
                         "Verified update ready",
                         "Milo " + event[2] +
                         " has downloaded and passed SHA-256 verification.\n\n"
-                        "Close Milo and open the installer now? "
-                        "Your existing Models and private memories stay in place."):
+                        "Install Milo " + event[2] + " and reopen it automatically "
+                        "when installation finishes? Milo will shut down cleanly "
+                        "before the installer replaces its files. Your existing "
+                        "Models and private memories stay in place."):
                         try:
                             import subprocess
+                            # Installer waits for this PID to fully exit,
+                            # preventing a race with the running exe/Colibri DLLs.
+                            # It then restarts Milo itself after installation.
                             subprocess.Popen(
-                                [str(destination)],
+                                [str(destination), "/WAITFORPID=" + str(os.getpid())],
                                 stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL,
