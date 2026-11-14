@@ -125,11 +125,11 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "NSIS install failed" }
           }
           & $compiler /V3 "desktop/install/Milo.nsi"
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path "Milo-Setup-0.9.0.exe")) { throw "NSIS build failed" }
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path "Milo-Setup-0.9.1.exe")) { throw "NSIS build failed" }
       - name: Test real installer and upgrade preserving models
         shell: pwsh
         run: |
-          $exe = (Resolve-Path "Milo-Setup-0.9.0.exe").Path
+          $exe = (Resolve-Path "Milo-Setup-0.9.1.exe").Path
           $first = Start-Process -FilePath $exe -ArgumentList "/S" -Wait -PassThru
           if ($first.ExitCode -ne 0) { throw "Installer returned $($first.ExitCode)" }
           $installed = Join-Path $env:LOCALAPPDATA "Programs/Milo"
@@ -167,9 +167,9 @@ jobs:
       - name: Upload actual installer and independently updateable feature package
         uses: actions/upload-artifact@v4
         with:
-          name: Milo-Installer-0.9.0-Preview
+          name: Milo-Installer-0.9.1-Preview
           path: |
-            Milo-Setup-0.9.0.exe
+            Milo-Setup-0.9.1.exe
             milo-module-system_info-0.1.0.zip
             milo-modules.json
           retention-days: 30
@@ -184,14 +184,14 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tip)) { throw "Cannot verify branch" }
           $tipSha = ($tip -split '\s+')[0].ToLowerInvariant()
           if ($tipSha -ne $env:GITHUB_SHA.ToLowerInvariant()) { Write-Host "Stale build; skip publication"; exit 0 }
-          gh release view milo-v0.9.0 --repo BoomForge/colibri 2>$null | Out-Null
+          gh release view milo-v0.9.1 --repo BoomForge/colibri 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) { Write-Host "Release already exists; leaving it unchanged"; exit 0 }
-          $exe = "Milo-Setup-0.9.0.exe"
+          $exe = "Milo-Setup-0.9.1.exe"
           if (!(Test-Path $exe)) { throw "Verified installer missing" }
           $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
-          "$hash  $exe" | Set-Content Milo-0.9.0-SHA256.txt -Encoding ascii
-          $notes = "Milo 0.9.0 Windows preview: fixed right-click conversation delete, global quick chat, owner-approved screen capture, optional local vision and reviewed file operations. Unsigned pre-release. Verify hash and back up local Milo data and Models. SHA-256 installer: $hash. Source commit: $env:GITHUB_SHA."
-          gh release create milo-v0.9.0 $exe milo-modules.json milo-module-system_info-0.1.0.zip Milo-0.9.0-SHA256.txt --repo BoomForge/colibri --target "$env:GITHUB_SHA" --prerelease --title "Milo 0.9.0 Windows Preview" --notes $notes
+          "$hash  $exe" | Set-Content Milo-0.9.1-SHA256.txt -Encoding ascii
+          $notes = "Milo 0.9.1 Windows preview: fixed right-click conversation delete, global quick chat, owner-approved screen capture, optional local vision and reviewed file operations. Unsigned pre-release. Verify hash and back up local Milo data and Models. SHA-256 installer: $hash. Source commit: $env:GITHUB_SHA."
+          gh release create milo-v0.9.1 $exe milo-modules.json milo-module-system_info-0.1.0.zip Milo-0.9.1-SHA256.txt --repo BoomForge/colibri --target "$env:GITHUB_SHA" --prerelease --title "Milo 0.9.1 Windows Preview" --notes $notes
           if ($LASTEXITCODE -ne 0) { throw "Release upload failed" }
-          gh release view milo-v0.9.0 --repo BoomForge/colibri --json tagName,assets,isDraft,isPrerelease
+          gh release view milo-v0.9.1 --repo BoomForge/colibri --json tagName,assets,isDraft,isPrerelease
           if ($LASTEXITCODE -ne 0) { throw "Cannot confirm release" }
