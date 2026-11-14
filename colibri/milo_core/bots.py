@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath, PurePosixPath
 import re
 import sqlite3
 
@@ -47,8 +47,12 @@ def _validate_model_location(value: str):
     if not isinstance(value, str) or len(value) > 360:
         raise ValueError("invalid model location")
     if value:
-        path = Path(value)
-        if path.is_absolute() or ".." in path.parts:
+        windows = PureWindowsPath(value)
+        posix = PurePosixPath(value.replace("\\", "/"))
+        if (windows.is_absolute() or windows.drive or posix.is_absolute()
+                or ".." in windows.parts or ".." in posix.parts
+                or any(part in {"", "."} for part in posix.parts)
+                or value.startswith(("/", "\\"))):
             raise ValueError("model must be a relative checkpoint under Models")
 
 
