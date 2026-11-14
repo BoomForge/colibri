@@ -38,8 +38,8 @@ from colibri.milo_core.windows_actions import (
     WindowsAction, available_actions, parse_action_request, execute_action,
 )
 from colibri.milo_core.pc_broker import (
-    PCActionError, PCPlan, parse_pc_request, execute_pc_plan, load_apps,
-    register_app, remove_app,
+    PCActionError, PCPlan, parse_pc_request, prepare_pc_plan,
+    execute_pc_plan, load_apps, register_app, remove_app,
 )
 from colibri.milo_core.global_hotkey import GlobalQuickChatHotkey
 from colibri.milo_core.tool_activity import (
@@ -1589,6 +1589,7 @@ class MiloDesktop:
             "  list files in documents  ·  list open windows\n"
             "  switch to Notepad  ·  type \"Hello\" into Notepad\n"
             "  rename \"old.txt\" to \"new.txt\" in downloads\n"
+            "  move files containing \"sprite\" from downloads to documents\n"
             "  create note \"ideas.txt\" in documents with text \"First idea\"\n"
             "Registered apps: add a local .exe below, then say 'open blender'.\n"
             "File changes, application launches, window focus and typing always "
@@ -1648,19 +1649,66 @@ class MiloDesktop:
         refresh()
         return panel
 
+    def _approve_pc_plan(self, plan: PCPlan) -> bool:
+        """Scrollable, complete per-action preview: no file list truncation."""
+        window = tk.Toplevel(self.root)
+        window.title("Milo · Approve "+plan.title)
+        window.configure(bg=PANEL)
+        window.geometry("690x485")
+        window.minsize(550, 360)
+        window.transient(self.root)
+        result = {"approved": False}
+        tk.Label(
+            window, text=plan.title+" — review before execution",
+            bg=PANEL, fg=FG, font=(FONT, 13, "bold")).pack(
+                fill="x", padx=20, pady=(16, 9))
+        details = tk.Frame(window, bg=PANEL)
+        details.pack(fill="both", expand=True, padx=18, pady=(0, 10))
+        scroll = tk.Scrollbar(details)
+        scroll.pack(side="right", fill="y")
+        view = tk.Text(
+            details, wrap="word", bg=BG, fg=FG, relief="flat",
+            font=(FONT, 10), padx=14, pady=12,
+            yscrollcommand=scroll.set)
+        view.pack(side="left", fill="both", expand=True)
+        scroll.configure(command=view.yview)
+        view.insert("1.0", plan.preview)
+        view.configure(state="disabled")
+        tk.Label(
+            window, text="One-time approval only. No future permissions "
+                         "are granted, and nothing runs on Cancel.",
+            bg=PANEL, fg=MUTED, font=(FONT, 9)).pack(
+                anchor="w", padx=20, pady=(0, 8))
+        actions = tk.Frame(window, bg=PANEL)
+        actions.pack(fill="x", padx=18, pady=(0, 14))
+        def finish(approved=False):
+            result["approved"] = bool(approved)
+            window.destroy()
+        new_button(actions, "Cancel", lambda: finish(False)).pack(side="left")
+        new_button(
+            actions, "Approve and execute", lambda: finish(True),
+            primary=True).pack(side="right")
+        window.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+        window.grab_set()
+        window.focus_set()
+        self.root.wait_window(window)
+        return result["approved"]
+
     def _perform_pc_plan(self, plan: PCPlan, *, chat_context):
-        """Display the exact proposed operation; deny has no side effects."""
+        """Separate model-independent action preview and owner confirmation."""
         if self.busy:
             messagebox.showinfo(
                 "Milo is responding", "Finish the current response first.",
                 parent=self.root)
             return
-        if not messagebox.askyesno(
-                "Approve Milo PC action — "+plan.title,
-                plan.preview[:1250] +
-                "\n\nExecute this ONE action now? "
-                "This approval does not grant future access.",
-                parent=self.root):
+        try:
+            plan = prepare_pc_plan(plan)
+        except (OSError, ValueError, PCActionError, FileMoveError) as exc:
+            self._audit("pc_"+plan.kind, "failed")
+            messagebox.showerror(
+                "PC action preview", str(exc)[:320], parent=self.root)
+            return
+        if not self._approve_pc_plan(plan):
             self._audit("pc_"+plan.kind, "denied")
             return
         self._audit("pc_"+plan.kind, "approved")
@@ -1671,7 +1719,8 @@ class MiloDesktop:
             outcome = execute_pc_plan(
                 plan, approved=True, registered=load_apps(PC_APPS))
             state = "completed"
-        except (OSError, ValueError, PermissionError, PCActionError) as exc:
+        except (OSError, ValueError, PermissionError, PCActionError,
+                FileMoveError) as exc:
             outcome = "I couldn't complete that PC action: "+str(exc)[:260]
             state = "failed"
         self._audit("pc_"+plan.kind, state)
