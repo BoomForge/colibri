@@ -144,8 +144,11 @@ class LocalEngine:
             self._log = (self.log_folder / "colibri-service.log").open("a", encoding="utf-8")
             self.port = _free_port()
             self.endpoint = "http://127.0.0.1:" + str(self.port) + "/v1"
-            command = [
-                sys.executable, "--colibri-service",
+            command = (
+                [sys.executable] if getattr(sys, "frozen", False)
+                else [sys.executable, "-m", "desktop.milo_desktop"]
+            ) + [
+                "--colibri-service",
                 "--model-dir", str(model),
                 "--runtime-dir", str(self.runtime),
                 "--port", str(self.port),
