@@ -48,6 +48,10 @@ def parse_open_request(prompt: str) -> OpenFileRequest | None:
     # as disk filenames extracted from a remote address.
     if re.search(r"\b(?:https?://|www\.)", prompt, re.I):
         return None
+    # Don't truncate a supplied directory traversal or drive-qualified path
+    # down to its basename. Such paths must go through an owner file picker.
+    if re.search(r"\.\.[/\\]|(?:[A-Za-z]:[/\\])|\\\\", prompt):
+        return None
     result = _FILENAME.search(prompt)
     if not result:
         return None
