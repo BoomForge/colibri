@@ -63,8 +63,8 @@ The unsigned 0.9 installer preview is produced by:
 https://github.com/BoomForge/colibri/actions/workflows/milo-09-preview-installer.yml
 
 Use the latest SUCCESSFUL run for this branch; open its Artifacts section and
-download **Milo-Installer-0.9.0-Preview**. Extract the artifact ZIP and run
-Milo-Setup-0.9.0.exe. Do not install if the run is failed or incomplete.
+download **Milo-Installer-0.9.1-Preview**. Extract the artifact ZIP and run
+Milo-Setup-0.9.1.exe. Do not install if the run is failed or incomplete.
 No external Ollama or vision weights are bundled in the Windows installer.
 The previous 0.8.0 is the publicly published fallback release.
 
