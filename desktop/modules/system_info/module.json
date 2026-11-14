@@ -1,0 +1,11 @@
+{
+  "api": 1,
+  "id": "system_info",
+  "version": "0.1.0",
+  "name": "System information",
+  "entrypoint": "plugin.py",
+  "permissions": [
+    "ui"
+  ],
+  "description": "Local read-only machine information"
+}
