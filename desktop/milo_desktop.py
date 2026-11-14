@@ -22,6 +22,11 @@ from urllib.request import urlopen
 import uuid
 
 import tkinter as tk
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+except ImportError:
+    TkinterDnD = None
+    DND_FILES = "DND_Files"
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from desktop.chat_view import ChatView, ConversationList, COLORS, avatar_widget, AvatarBank
 
@@ -33,6 +38,10 @@ from colibri.milo_core.desktop_actions import (
     parse_open_request, locate_file, validate_preview_path,
 )
 from desktop.file_viewer import open_preview
+from colibri.milo_core.attachments import (
+    AttachmentError, inspect_attachment, parse_dropped_paths,
+    stage_attachments, attachment_context, MAX_ATTACHMENTS,
+)
 from colibri.milo_core.model_catalog import (
     MODEL_PAGE, ModelDownloadError, inspect_abliterated_release,
     download_abliterated,
@@ -225,6 +234,7 @@ class MiloDesktop:
         self.plugin_actions, self.plugin_errors = load_module_actions(DATA_DIR)
         self.current_chat = self.config.get("current_chat") or "main"
         self.pending_message = None
+        self.queued_attachments = []
         self._build()
         self._refresh_profile()
         self._autoselect_local_model()
@@ -387,6 +397,11 @@ class MiloDesktop:
         browse.configure(
             bg=PANEL, fg=VIOLET, padx=9, pady=7, font=(FONT, 9))
         browse.pack(side="left", padx=(6, 2), pady=7)
+        attach = new_button(
+            composer, "＋ Attach", self.choose_attachments)
+        attach.configure(bg=PANEL, fg=VIOLET,
+                         padx=7, pady=7, font=(FONT, 9))
+        attach.pack(side="left", padx=(0, 2), pady=7)
         self.entry = tk.Text(
             composer, height=2, wrap="word", font=(FONT, 11),
             bg=PANEL, fg=FG, insertbackground=VIOLET,
@@ -412,6 +427,15 @@ class MiloDesktop:
                                    font=(FONT, 9), padx=8, pady=5)
         self.stop_button.pack(fill="x")
         self.stop_button.configure(state="disabled")
+        attach_row = tk.Frame(main, bg=BG)
+        attach_row.pack(fill="x", padx=19, pady=(0, 2))
+        self.attachment_status = tk.Label(
+            attach_row, text="", bg=BG, fg=VIOLET, font=(FONT, 8),
+            anchor="w")
+        self.attachment_status.pack(side="left", fill="x", expand=True)
+        new_button(attach_row, "Clear attachments",
+                   self.clear_attachments).pack(side="right")
+        self._install_drop_targets()
         tk.Label(main,
                  text="Private on your device   ·   Enter to send   ·   Shift+Enter for a new line",
                  bg=BG, fg=MUTED, font=(FONT, 8)).pack(
@@ -1135,6 +1159,72 @@ class MiloDesktop:
         new_button(panel, "Create conversation", create, primary=True).pack(
             fill="x", padx=24, pady=(18, 12))
 
+
+    def _install_drop_targets(self):
+        """Native Windows Explorer drops; manual picker remains fallback."""
+        self.drop_ready = False
+        for widget in (self.root, self.chat_view.canvas, self.entry):
+            try:
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind("<<Drop>>", self._on_drop_files)
+                self.drop_ready = True
+            except (AttributeError, tk.TclError):
+                continue
+        self._update_attachment_status()
+
+    def _on_drop_files(self, event):
+        try:
+            paths = parse_dropped_paths(self.root, event.data)
+            self._queue_attachments(paths)
+        except (AttachmentError, OSError, ValueError) as exc:
+            messagebox.showerror("Attach files", str(exc)[:250], parent=self.root)
+
+    def _queue_attachments(self, paths):
+        """Inspect locally; don't transmit files anywhere on selection."""
+        checked = list(self.queued_attachments)
+        if len(paths) + len(checked) > MAX_ATTACHMENTS:
+            raise AttachmentError("Attach up to five files per message")
+        for source in paths:
+            new = inspect_attachment(Path(source))
+            if new.path not in {a.path for a in checked}:
+                checked.append(new)
+        self.queued_attachments = checked
+        self._update_attachment_status()
+
+    def _update_attachment_status(self):
+        if not hasattr(self, "attachment_status"):
+            return
+        if self.queued_attachments:
+            labels = ", ".join(a.name for a in self.queued_attachments)
+            self.attachment_status.configure(
+                text="Attached · " + labels[:140] +
+                ("…" if len(labels) > 140 else ""))
+        else:
+            self.attachment_status.configure(
+                text=("Drop images/documents here · local files only"
+                      if getattr(self, "drop_ready", False)
+                      else "Attach images/documents with ＋ Attach"))
+
+    def choose_attachments(self):
+        files = filedialog.askopenfilenames(
+            title="Attach images or documents for this chat",
+            filetypes=[
+                ("Images and documents",
+                 "*.png *.jpg *.jpeg *.webp *.gif *.bmp *.pdf *.docx "
+                 "*.txt *.md *.markdown *.rst *.csv *.json *.py *.js "
+                 "*.ts *.yaml *.yml *.log *.html *.htm"),
+                ("All files", "*.*"),
+            ], parent=self.root)
+        if files:
+            try:
+                self._queue_attachments([Path(file) for file in files])
+            except (AttachmentError, OSError, ValueError) as exc:
+                messagebox.showerror("Attach files", str(exc)[:250],
+                                     parent=self.root)
+
+    def clear_attachments(self):
+        self.queued_attachments = []
+        self._update_attachment_status()
 
     def chat_view_selection(self):
         """One continuous selectable text area spanning all visible messages."""
@@ -2869,7 +2959,13 @@ def main() -> int:
         return embedded_self_test()
     if "--self-test" in sys.argv:
         return self_test()
-    root = tk.Tk()
+    if TkinterDnD is not None:
+        try:
+            root = TkinterDnD.Tk()
+        except tk.TclError:
+            root = tk.Tk()
+    else:
+        root = tk.Tk()
     MiloDesktop(root)
     root.mainloop()
     return 0
