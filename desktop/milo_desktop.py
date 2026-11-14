@@ -2308,7 +2308,10 @@ def ui_self_test() -> int:
             mark("after sidebar")
             app.models_window()
             app.updates_modules_window()
-            mark("after tool windows")
+            assert app.bot_side.winfo_exists(), "bot roster sidebar missing"
+            assert app.model_selector.winfo_exists(), "per-chat model selector missing"
+            app._edit_bot_window()  # create-bot editor must open
+            mark("after tool windows and bot editor")
             app.chat_view.clear()
             mark("after clear")
             at = datetime.now().astimezone()
@@ -2330,6 +2333,12 @@ def ui_self_test() -> int:
             assert not reply["grouped"], "different authors must show headers"
             assert len(app.chat_view.messages) == 4
             assert reply["content"] == "Hello from compact Milo chat"
+            specialist = app.chat_view.add_message(
+                "assistant", "A specialist test reply", at,
+                author_id="qa_code", author_name="QA Code")
+            assert specialist["author_name"] == "QA Code"
+            assert not specialist["grouped"], "different bot speakers must not merge"
+            assert app.model_option_map, "per-chat model mapping missing"
             assert code["body"].copy_widgets, "copyable Tk text widgets missing"
             assert len(code["body"].copy_widgets) >= 2, "code block missing"
             assert app.entry_placeholder, "composer hint missing"
