@@ -58,7 +58,7 @@ _NAME = re.compile(r"^[^\x00-\x1f<>:\"/\\|?*]{1,120}$")
 _RESERVED = re.compile(r"^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", re.I)
 _NO_ACTION = re.compile(r"^\s*(?:how|why|what if|explain|tutorial|should i|would it)\b", re.I)
 _PREFIX = re.compile(r"^\s*(?:(?:hey\s+)?milo[,:]?\s+)?(?:(?:can|could|would)\s+you\s+|please\s+)*", re.I)
-_ACTION = re.compile(r"^(open|launch|start|run|show|list|summari[sz]e|rename|create|make|switch to|focus|type|what)\b", re.I)
+_ACTION = re.compile(r"^(open|launch|start|run|show|list|summari[sz]e|rename|create|make|switch to|focus|type|move|organise|organize)\b", re.I)
 _QUOTES = r"""["']([^"'\r\n]{1,500})["']"""
 _WINDOWS_BLOCK = ("powershell", "command prompt", "terminal", "administrator",
                   "registry editor", "password", "credential", "windows security",
