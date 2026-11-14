@@ -200,9 +200,10 @@ def resolve_target(db: sqlite3.Connection, prompt: str,
 
 def model_for_turn(settings: ChatSettings, bot: Bot | None,
                    default_model: str) -> str:
-    """An explicit bot preference wins, then chat choice, then Milo default."""
-    return (bot.model_location if bot and bot.model_location
-            else settings.model_location or default_model)
+    """An explicit per-chat model wins; otherwise use the bot's preference."""
+    return (settings.model_location or
+            (bot.model_location if bot and bot.model_location else "") or
+            default_model)
 
 
 def append_attributed_turn(db: sqlite3.Connection, chat_id: str,
