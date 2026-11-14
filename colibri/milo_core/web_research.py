@@ -10,6 +10,7 @@ Only an owner-confirmed current user query is transmitted.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 import ipaddress
 import re
@@ -183,6 +184,14 @@ def parse_rss(payload: bytes, *, limit=MAX_RESULTS) -> list[WebSource]:
             clean_url = _safe_url(url)
         except ResearchError:
             continue
+        host = (urlsplit(clean_url).hostname or "").lower()
+        # The user's complaint was real: search-engine redirect links are not
+        # original source websites and cannot be verified as such.
+        if (host in {"bing.com", "www.bing.com", "r.bing.com",
+                     "www.google.com", "google.com", "duckduckgo.com"}
+                or host.endswith(".bing.com")
+                or "/ck/a" in clean_url.lower()):
+            continue
         if clean_url not in {source.url for source in found}:
             found.append(WebSource(title, clean_url, desc))
         if len(found) >= limit:
@@ -258,6 +267,30 @@ def search_results_reply(query: str, sources: list[WebSource]) -> str:
             "",
         ])
     return "\n".join(lines).strip()
+
+
+def harvard_references(sources: list[WebSource], *,
+                       accessed: datetime | None = None) -> str:
+    """Harvard-style bibliography without inventing publication dates.
+
+    Search RSS does not reliably expose named authors or publication dates.
+    Use the verified source hostname as corporate author and n.d. until
+    stronger metadata is available. Link to the actual source, not Bing.
+    """
+    if not sources:
+        return ""
+    today = accessed or datetime.now(timezone.utc)
+    date = f"{today.day} {today.strftime('%B %Y')}"
+    lines = ["References (Harvard style; publication dates unverified)"]
+    for source in sources:
+        hostname = urlsplit(source.url).hostname or "Unknown website"
+        organisation = hostname.removeprefix("www.")
+        title = source.title.strip().replace("\n", " ")[:180]
+        lines.append(
+            f"{organisation} (n.d.) '{title}', {organisation}. "
+            f"Available at: {source.url} (Accessed: {date})."
+            + (" [Search snippet only]" if not source.body else ""))
+    return "\n\n" + "\n".join(lines)
 
 
 def source_footer(sources: list[WebSource]) -> str:
