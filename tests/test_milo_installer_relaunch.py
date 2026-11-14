@@ -16,7 +16,7 @@ class InstallerRelaunchTests(unittest.TestCase):
             encoding="utf-8")
         install = installer.split('Section "Install Milo" SEC_MAIN', 1)[1]
         install = install.split("SectionEnd", 1)[0]
-        self.assertIn('!define VERSION "0.9.4"', installer)
+        self.assertIn('!define VERSION "0.9.5"', installer)
         self.assertIn('File /r "..\\..\\dist\\Milo\\*"', install)
         self.assertIn('IfSilent skip_launch', install)
         self.assertIn("Exec '\"$INSTDIR\\Milo.exe\"'", install)
@@ -47,7 +47,7 @@ class InstallerRelaunchTests(unittest.TestCase):
         self.assertIn('Start-Sleep -Seconds 5', workflow)
         self.assertIn('Installer did not wait for previous process exit', workflow)
         self.assertIn('Silent setup unexpectedly started Milo.exe', workflow)
-        self.assertIn('Milo-Setup-0.9.4.exe', workflow)
+        self.assertIn('Milo-Setup-0.9.5.exe', workflow)
 
 
 if __name__ == "__main__":
