@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import zipfile
 import uuid
 
 MAX_SOURCE_BYTES = 12 * 1024 * 1024
@@ -86,6 +87,14 @@ def extract_text(path: Path) -> str:
         except Exception as exc:
             raise DocumentError("Could not safely extract text from this PDF") from exc
     elif extension == ".docx":
+        try:
+            # Reject archive expansion bombs before python-docx processes XML.
+            with zipfile.ZipFile(path) as archive:
+                entries = archive.infolist()
+                if len(entries) > 2500 or sum(x.file_size for x in entries) > 60_000_000:
+                    raise DocumentError("DOCX archive is too large after expansion")
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise DocumentError("Invalid DOCX archive") from exc
         try:
             from docx import Document
         except ImportError as exc:
