@@ -98,6 +98,8 @@ jobs:
             $p = Start-Process -FilePath $exe -ArgumentList $arg -PassThru
             if (!$p.WaitForExit(25000)) {
               Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              $trace = Join-Path $env:TEMP "milo-ui-diagnostics.log"
+              if (Test-Path $trace) { Get-Content $trace | Select-Object -Last 100 | Write-Host }
               throw "Bundled Milo $arg timed out (possible UI deadlock)"
             }
             if ($p.ExitCode -ne 0) { throw "Milo binary failed $arg with exit $($p.ExitCode)" }
