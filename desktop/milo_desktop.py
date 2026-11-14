@@ -934,17 +934,30 @@ class MiloDesktop:
     def send(self):
         if self.busy:
             return
-        prompt = ("" if self.entry_placeholder
-                  else self.entry.get("1.0", "end-1c").strip())
+        prompt = ("" if self.entry_placeholder else
+                  self.entry.get("1.0", "end-1c").strip())
         if not prompt:
             return
         if len(prompt) > 20000:
             messagebox.showerror("Message too long", "Keep messages below 20,000 characters.")
             return
-        # Deterministic read-only local file listings bypass the language
-        # model. This is real functionality, not an invented file inventory.
-        requested_files = (parse_file_query(prompt)
-                           if module_enabled(DATA_DIR, "files") else None)
+        settings = chat_settings(self.db.db, self.current_chat)
+        try:
+            target_id, clean_prompt = resolve_target(self.db.db, prompt, settings)
+        except ValueError as exc:
+            messagebox.showerror("Mentioned bot", str(exc)[:260])
+            return
+        bot = get_bot(self.db.db, target_id) if target_id != "milo" else None
+        author_name = bot.name if bot else self.config.get("milo_name", "Milo")
+        author_avatar = self._bot_avatar_path(bot)
+        model_location = model_for_turn(
+            settings, bot, self.config.get("model_location", ""))
+
+        # Milo's local deterministic file tools remain a separate, read-only
+        # path. A specialist bot does not silently inherit Milo's tools.
+        requested_files = (parse_file_query(clean_prompt)
+                           if target_id == "milo" and module_enabled(DATA_DIR, "files")
+                           else None)
         if requested_files is not None:
             chat_id = self.current_chat
             self.entry.delete("1.0", "end")
@@ -952,7 +965,8 @@ class MiloDesktop:
             self.entry.configure(fg=FG)
             self._display_turn("user", prompt, datetime.now().astimezone())
             self.pending_message = self.chat_view.add_message(
-                "assistant", "", datetime.now().astimezone(), streaming=True)
+                "assistant", "", datetime.now().astimezone(), streaming=True,
+                author_id="milo", author_name=author_name, avatar=author_avatar)
             self._set_busy(True)
             def file_worker():
                 try:
@@ -965,33 +979,60 @@ class MiloDesktop:
                 except Exception as exc:
                     self.events.put(("error", chat_id, "Local file listing failed: "
                                      + str(exc)[:250]))
-            threading.Thread(target=file_worker,
-                             name="milo-local-files", daemon=True).start()
+            threading.Thread(
+                target=file_worker, name="milo-local-files", daemon=True).start()
             return
-        model = self.config.get("model", "")
-        if self.config.get("model_location") and not self.model_ready:
-            messagebox.showinfo("Loading model",
-                "The local model is not ready yet. Check the status above, "
-                "or open Models to change it.")
-            return
-        if not model:
-            messagebox.showinfo("Connect a model",
-                "Milo needs a local Colibri model. Start Colibri and select a model in Settings.")
+
+        if model_location:
+            candidate = chosen_model(self.models_root, model_location)
+            if candidate is None:
+                messagebox.showerror(
+                    "Model not installed",
+                    "This chat or bot is assigned a missing model: " + model_location +
+                    "\nChoose an installed checkpoint from the model selector.")
+                return
+            if (self.engine_starting or not self.model_ready
+                    or self.active_model_location != model_location):
+                # Keep the typed prompt until its requested checkpoint is
+                # ready; never send to whichever model happens to be active.
+                self.pending_send = (self.current_chat, prompt, model_location)
+                self.connection_label.configure(
+                    text="Switching local model for @" + target_id + "  •  " +
+                         candidate.name, fg=ORANGE)
+                if not self.engine_starting:
+                    self._launch_managed_model(candidate)
+                return
+        elif not self.model_ready:
+            messagebox.showinfo(
+                "Choose a model",
+                "Install/select a local Colibri model before sending. "
+                "Each new chat can choose its own checkpoint.")
             self.check_connection()
+            return
+
+        model = self.config.get("model", "")
+        if model not in self.models and self.models:
+            model = self.models[0]
+        if not model:
+            messagebox.showinfo(
+                "Connect a model", "Milo needs an active local chat-capable Colibri model.")
             return
         try:
             LocalOpenAIProvider(model=model, base_url=self.active_base_url)
         except (ValueError, TypeError) as exc:
             messagebox.showerror("Invalid model settings", str(exc))
             return
+
         chat_id = self.current_chat
+        self.pending_send = None
         self.entry.delete("1.0", "end")
         self.entry_placeholder = False
         self.entry.configure(fg=FG)
-        sent_at = datetime.now().astimezone()
-        self._display_turn("user", prompt, sent_at)
+        self._display_turn("user", prompt, datetime.now().astimezone())
         self.pending_message = self.chat_view.add_message(
-            "assistant", "", datetime.now().astimezone(), streaming=True)
+            "assistant", "", datetime.now().astimezone(),
+            streaming=True, author_id=target_id, author_name=author_name,
+            avatar=author_avatar)
         self.cancel.clear()
         self._set_busy(True)
 
@@ -999,16 +1040,19 @@ class MiloDesktop:
             try:
                 with LocalMemoryStore(DB_PATH) as store:
                     provider = LocalOpenAIProvider(
-                        model=model, base_url=self.active_base_url
-                    )
+                        model=model, base_url=self.active_base_url)
+                    instructions = (bot.instructions if bot else
+                                    MiloProfile().instructions)
                     conversation = MiloConversation(
                         provider, store,
                         profile=MiloProfile(
-                            name=self.config["milo_name"],
-                            instructions=MiloProfile().instructions,
-                        ),
-                    )
-                    chunks = conversation.stream_reply(prompt, chat_id=chat_id)
+                            name=author_name, instructions=instructions),
+                        bot_id=target_id, bot_name=author_name,
+                        bot_avatar=bot.avatar if bot else "",
+                        shared_room=(settings.kind == "room"))
+                    chunks = conversation.stream_reply(
+                        clean_prompt, chat_id=chat_id,
+                        stored_user_text=prompt)
                     try:
                         for chunk in chunks:
                             if self.cancel.is_set():
@@ -1020,9 +1064,10 @@ class MiloDesktop:
                         chunks.close()
                 self.events.put(("done", chat_id))
             except Exception as exc:
-                # Do not expose model requests or transcript content in logs.
+                # Do not include prompt text or private archive contents in logs.
                 self.events.put(("error", chat_id, str(exc)[:300]))
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, name="milo-chat-" + target_id,
+                         daemon=True).start()
 
     def stop(self):
         if self.busy:
