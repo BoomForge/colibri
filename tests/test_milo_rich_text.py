@@ -1,6 +1,6 @@
 """Untrusted generated code is displayed and copied, never executed."""
 import unittest
-from desktop.rich_text import split_fenced_blocks, visual_rows
+from desktop.rich_text import split_fenced_blocks, visual_rows, find_https_links
 
 
 class FencedCodeTests(unittest.TestCase):
@@ -24,6 +24,15 @@ class FencedCodeTests(unittest.TestCase):
     def test_plain_text_not_executed(self):
         source = "import os; os.remove('anything')"
         self.assertEqual(split_fenced_blocks(source)[0].content, source)
+
+    def test_sources_are_genuine_clickable_https_links(self):
+        text = ("Sources\n[W1] NASA: https://science.nasa.gov/uap/.\n"
+                "[W2] Example https://example.org/news?q=ufo, and also "
+                "http://localhost/debug")
+        found = list(find_https_links(text))
+        self.assertEqual(len(found), 2)
+        self.assertEqual(found[0][2], "https://science.nasa.gov/uap/")
+        self.assertEqual(found[1][2], "https://example.org/news?q=ufo")
 
     def test_unknown_language_safe(self):
         blocks = split_fenced_blocks(chr(96) * 3 + "my-lang\n1\n" + chr(96) * 3)
