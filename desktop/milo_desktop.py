@@ -1191,7 +1191,32 @@ def self_test() -> int:
     return 0
 
 
+def embedded_self_test() -> int:
+    """Verify the built package includes the first-party Colibri gateway and engines."""
+    runtime = install_root() / "Runtime"
+    if not (runtime / "openai_server.py").is_file():
+        print("Missing bundled openai_server.py", file=sys.stderr)
+        return 1
+    if not (runtime / "qwen36.exe").is_file():
+        print("Missing bundled qwen36.exe", file=sys.stderr)
+        return 1
+    import importlib
+    if str(runtime) not in sys.path:
+        sys.path.insert(0, str(runtime))
+    gateway = importlib.import_module("openai_server")
+    registry = importlib.import_module("family_registry")
+    assert hasattr(gateway, "serve") and hasattr(registry, "resolve_model")
+    print("Bundled Colibri gateway and Qwen inference executable found.")
+    return 0
+
+
 def main() -> int:
+    if "--colibri-service" in sys.argv:
+        from desktop.colibri_service import run_service
+        args = sys.argv[sys.argv.index("--colibri-service") + 1:]
+        return run_service(args)
+    if "--embedded-self-test" in sys.argv:
+        return embedded_self_test()
     if "--self-test" in sys.argv:
         return self_test()
     root = tk.Tk()
