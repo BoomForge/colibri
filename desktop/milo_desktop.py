@@ -44,6 +44,9 @@ from desktop.screen_capture import capture_primary_screen, ScreenCaptureError
 from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
 from colibri.milo_core.filesystem import find_files_by_prefix
+from colibri.milo_core.file_operations import (
+    FileMoveError, plan_file_moves, execute_file_moves,
+)
 from colibri.milo_core.chat_files import parse_file_query, answer_file_query
 from colibri.milo_core.desktop_actions import (
     parse_open_request, locate_file, validate_preview_path,
@@ -334,6 +337,7 @@ class MiloDesktop:
             ("Memory", self.memory_window, "memory"),
             ("Restore Milo personality", self.restore_milo_personality, "memory"),
             ("Find files", self.find_files_window, "files"),
+            ("Organise files", self.organise_files_window, "files"),
             ("Windows tools", self.windows_tools_window, "files"),
             ("Ask SOL", self.sol_window, "sol"),
             ("Back up / Restore", self.backup_window, "backup"),
@@ -2367,6 +2371,16 @@ class MiloDesktop:
                     messagebox.showinfo("Milo backup", event[1])
                 elif kind == "backup_error":
                     messagebox.showerror("Milo backup", event[1])
+                elif kind == "file_organize_done":
+                    self._audit("file_organize", "completed")
+                    messagebox.showinfo(
+                        "File organiser",
+                        f"Moved {event[1]} approved file(s) successfully. "
+                        "No existing files were overwritten.", parent=self.root)
+                elif kind == "file_organize_error":
+                    self._audit("file_organize", "failed")
+                    messagebox.showerror(
+                        "File organiser", event[1], parent=self.root)
                 elif kind == "file_search":
                     self._show_search_results(event[1], event[2])
                 elif kind == "file_search_error":
@@ -3293,6 +3307,117 @@ class MiloDesktop:
         new_button(buttons, "Delete selected", remove).pack(side="left")
         refresh()
 
+    def organise_files_window(self):
+        """Explicit owner folders and reviewed list; no LLM-driven file moves."""
+        panel = self._panel(
+            "Organise files",
+            "Preview-only until you approve the complete file list. "
+            "No overwrites or executable files; same drive only.")
+        panel.geometry("690x680")
+        source_var = tk.StringVar()
+        target_var = tk.StringVar()
+        match_var = tk.StringVar()
+        for caption, variable in (
+            ("Source folder", source_var),
+            ("Destination folder", target_var),
+        ):
+            tk.Label(panel, text=caption, bg=PANEL, fg=MUTED).pack(
+                anchor="w", padx=24, pady=(10, 3))
+            row = tk.Frame(panel, bg=PANEL)
+            row.pack(fill="x", padx=24)
+            tk.Entry(row, textvariable=variable, bg=BG, fg=FG,
+                     font=(FONT, 9), relief="flat").pack(
+                         side="left", fill="x", expand=True, ipady=7)
+            new_button(row, "Browse…", lambda v=variable: v.set(
+                filedialog.askdirectory(parent=panel) or v.get())).pack(
+                    side="left", padx=(8, 0))
+        tk.Label(panel, text="Filename contains (literal text, e.g. stone)",
+                 bg=PANEL, fg=MUTED).pack(
+                     anchor="w", padx=24, pady=(14, 3))
+        tk.Entry(panel, textvariable=match_var, bg=BG, fg=FG,
+                 font=(FONT, 9), relief="flat").pack(
+                     fill="x", padx=24, ipady=8)
+        listing = tk.Listbox(panel, height=10, bg=BG, fg=FG,
+                             selectbackground=EDGE, relief="flat",
+                             font=("Consolas", 9))
+        listing.pack(fill="both", expand=True, padx=24, pady=(12, 4))
+        status = tk.Label(panel, text="No files selected or moved.",
+                          bg=PANEL, fg=MUTED, wraplength=610,
+                          justify="left")
+        status.pack(anchor="w", padx=24, pady=(5, 10))
+        approved_plan = [None]
+        controls = tk.Frame(panel, bg=PANEL)
+        controls.pack(fill="x", padx=24, pady=(4, 16))
+        move_button = new_button(controls, "Move reviewed files", lambda: None,
+                                 primary=True)
+        move_button.configure(state="disabled")
+        move_button.pack(side="right", padx=(6, 0))
+
+        def invalidate(*_):
+            approved_plan[0] = None
+            move_button.configure(state="disabled")
+            listing.delete(0, "end")
+            status.configure(text="Folders or filter changed · preview again.")
+        for variable in (source_var, target_var, match_var):
+            variable.trace_add("write", invalidate)
+
+        def preview():
+            listing.delete(0, "end")
+            move_button.configure(state="disabled")
+            approved_plan[0] = None
+            try:
+                plan = plan_file_moves(
+                    source_var.get(), target_var.get(), match_var.get())
+            except (FileMoveError, OSError, ValueError) as exc:
+                status.configure(text="Preview failed: " + str(exc)[:250],
+                                 fg=ORANGE)
+                return
+            if not plan.files:
+                status.configure(text="No supported matching files found.",
+                                 fg=MUTED)
+                return
+            for item in plan.files:
+                listing.insert(
+                    "end", item.source.name + "  (" +
+                    format(item.size, ",") + " bytes)")
+            approved_plan[0] = plan
+            status.configure(
+                text=f"Preview: {len(plan.files)} file(s). Originals remain "
+                     "untouched until you approve the move.", fg=FG)
+            move_button.configure(state="normal")
+
+        def move():
+            plan = approved_plan[0]
+            if plan is None:
+                return
+            if not messagebox.askyesno(
+                    "Approve file move",
+                    "Move ALL " + str(len(plan.files)) + " reviewed files?\n\n"
+                    + "FROM: " + str(plan.source_root)
+                    + "\nTO: " + str(plan.destination_root)
+                    + "\n\nNo files will be overwritten. This changes your "
+                    "original project folders; make a backup if needed.",
+                    parent=panel):
+                self._audit("file_organize", "denied")
+                return
+            self._audit("file_organize", "approved")
+            self._audit("file_organize", "started")
+            approved_plan[0] = None
+            move_button.configure(state="disabled")
+            status.configure(text="Moving reviewed files…", fg=ORANGE)
+            def worker():
+                try:
+                    moved = execute_file_moves(plan, approved=True)
+                    self.events.put(("file_organize_done", moved))
+                except (FileMoveError, PermissionError, OSError) as exc:
+                    self.events.put(("file_organize_error", str(exc)[:350]))
+            threading.Thread(
+                target=worker, name="milo-owner-file-move", daemon=True).start()
+
+        move_button.configure(command=move)
+        new_button(controls, "Preview matching files", preview).pack(side="left")
+        return panel
+
     def find_files_window(self):
         panel = self._panel("Find files", "Deterministic search. No model or network used.")
         chosen = tk.StringVar(value=str(Path.home() / "Documents"))
@@ -3552,6 +3677,13 @@ def ui_self_test() -> int:
             windows_tools = app.windows_tools_window()
             assert windows_tools.winfo_exists(), "Windows action picker missing"
             windows_tools.destroy()
+            organiser = app.organise_files_window()
+            assert organiser.winfo_exists(), "File organiser preview missing"
+            organiser.destroy()
+            settings_panel = app.settings_window()
+            assert settings_panel is None or settings_panel.winfo_exists()
+            # Settings can open without activating vision or network access.
+            mark("after optional vision and file tools UI")
             app._audit("quick_chat", "completed")
             assert list_activity(app.db.db)[0][1:] == (
                 "quick_chat", "completed"), "Activity log did not persist"
