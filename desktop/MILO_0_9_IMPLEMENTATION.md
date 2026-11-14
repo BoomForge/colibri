@@ -1,12 +1,32 @@
 # Milo 0.9 — Desktop awareness, local vision and reviewed actions
 
 **Status:** working development branch and unsigned Windows installer PREVIEW.
-**Production release:** Milo 0.8.0 remains unchanged. No 0.9 GitHub Release
-has been published or offered through Milo's automatic updater.
+**Released baseline:** Milo 0.9.2 is available from GitHub Releases. This document
+covers Milo 0.9.3, built and released separately after its Windows CI checks.
 **Branch:** feature/milo-09-desktop-awareness.
 **Draft PR:** https://github.com/BoomForge/colibri/pull/1
 
 ## Implemented
+
+### Windows system tray (0.9.3)
+- The application's window X and Alt+F4 hide Milo in the notification area;
+  the Windows minimise button also hides it to the same tray.
+- Tray left-click or **Open Milo** from its right-click menu restores the
+  main window, including panels hidden alongside it.
+- **Close Milo** in the tray right-click menu is the normal shutdown action.
+  This stops the bundled Colibri engine, saves/retains local data and removes
+  the notification-area icon. A separately approved app update also exits
+  deliberately to allow installer replacement.
+- Milo's conversation database, running model, hotkey and background process
+  are not shut down when its windows are merely hidden.
+- The tray must be available before Milo hides. If icon creation fails,
+  the main app stays accessible instead of vanishing; a failed icon host
+  triggers recovery of any hidden window.
+- The tray backend is bundled with PyInstaller using pystray 0.19.5 and
+  Pillow; no always-on external service, new user account, or telemetry.
+- Native Windows CI verifies the tray package is present in the frozen
+  executable and tests the Tk hide/restore lifecycle. Real mouse and shell
+  tray behaviour must still be checked on the owner's machine.
 
 ### Quick chat and screen
 - Windows global Ctrl+Shift+M shortcut using RegisterHotKey (no key
@@ -63,21 +83,24 @@ The unsigned 0.9 installer preview is produced by:
 https://github.com/BoomForge/colibri/actions/workflows/milo-09-preview-installer.yml
 
 Use the latest SUCCESSFUL run for this branch; open its Artifacts section and
-download **Milo-Installer-0.9.2-Preview**. Extract the artifact ZIP and run
-Milo-Setup-0.9.2.exe. Do not install if the run is failed or incomplete.
+download **Milo-Installer-0.9.3-Preview**. Extract the artifact ZIP and run
+Milo-Setup-0.9.3.exe. Do not install if the run is failed or incomplete.
 No external Ollama or vision weights are bundled in the Windows installer.
-The previous 0.8.0 is the publicly published fallback release.
+Milo 0.9.2 remains available as the previous GitHub Release.
 
 The preview workflow verifies its pinned 13-engine Colibri runtime checksums,
 runs Milo regressions, packages the current Tk Windows app and official Milo
 icon, tests the frozen binary, runs a silent NSIS install, and tests an upgrade
-with a model preservation sentinel. It NEVER publishes a GitHub Release.
+with a model preservation sentinel. A successful up-to-date branch run publishes
+an unsigned, SHA-256-labelled GitHub pre-release, which the built-in updater
+can discover. Failed or superseded runs cannot publish.
 
 ## Not yet tested/implemented
 
 - End-to-end local vision output on the owner's Windows GPU and actual
   selected Ollama model (CI uses synthetic / mocked image responses).
-- Real desktop hotkey conflicts and screenshot capture on the owner's monitor.
+- Real desktop hotkey conflicts, screenshot capture and tray click behaviour on
+  the owner's Windows desktop.
 - Voice, computer-wide autonomous clicking/typing, arbitrary Windows settings
   changes, email/calendar actions and ongoing agentic automation.
 - Full-featured cross-volume file moves or bulk operations without previews.
@@ -97,6 +120,12 @@ with a model preservation sentinel. It NEVER publishes a GitHub Release.
    contents; test destination name collisions before production files.
 7. Confirm Tool activity records only actions/statuses, not file paths.
 8. Test Windows Settings shortcuts with explicit approval.
+9. Close the main window with X: Milo must disappear from the taskbar while its
+   purple icon remains in the Windows tray (possibly in the ^ overflow area).
+   Click the tray icon to reopen Milo and confirm the same conversation exists.
+10. Press Minimise: Milo must hide to the tray without stopping local inference.
+    Right-click the tray icon and choose Close Milo; verify the process exits.
+    Reopen Milo from Start to check that conversations and models are retained.
 
 Do not commit owner screenshots, chat transcripts, private memory archives,
 personal backups, or model weights to this repository or public releases.
