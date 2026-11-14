@@ -65,9 +65,10 @@ class BrokerTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             execute_pc_plan(plan, platform="win32", app_launcher=called.append)
         self.assertEqual(called, [])
-        result = execute_pc_plan(plan, platform="win32", app_launcher=called.append)
-        # An approved flag is mandatory even for the app allowlist.
-        self.fail("unapproved call unexpectedly executed "+result)
+        result = execute_pc_plan(
+            plan, approved=True, platform="win32", app_launcher=called.append)
+        self.assertEqual(result, "Launched notepad.")
+        self.assertEqual(called, ["notepad.exe"])
 
     def test_launch_registered_app_and_revoke_it(self):
         with tempfile.TemporaryDirectory() as d:
