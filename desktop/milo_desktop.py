@@ -922,6 +922,18 @@ class MiloDesktop:
         self.send_button.configure(state="disabled" if busy else "normal")
         self.stop_button.configure(state="normal" if busy else "disabled")
 
+    def _restore_service_status(self):
+        if self.model_ready and self.models:
+            self.connection_label.configure(
+                text="● Bundled Colibri  •  " + self.models[0],
+                fg="#9fdfb4")
+        elif self.engine_starting:
+            self.connection_label.configure(
+                text="● Loading local model…", fg=ORANGE)
+        else:
+            self.connection_label.configure(
+                text="● Model offline · local tools available", fg=MUTED)
+
     def _append(self, text: str, tag: str = "notice"):
         # Legacy helper retained only for non-message status notices.
         if text.strip():
@@ -1620,6 +1632,52 @@ class MiloDesktop:
                     self.check_connection()
                 elif kind == "model_import_error":
                     messagebox.showerror("Model import", event[1])
+                elif kind == "file_preview_ready":
+                    chat_id, prompt, chosen_path = event[1:4]
+                    try:
+                        preview, details = open_preview(self.root, Path(chosen_path))
+                        if details["kind"] == "image":
+                            w, h = details["dimensions"]
+                            reply = (
+                                "Opened a local image preview: " +
+                                Path(chosen_path).name +
+                                f" ({w} × {h} pixels).\n\n"
+                                "This displays the actual file from your PC, "
+                                "but the current text model cannot analyse its "
+                                "visual content. You can also open it in your "
+                                "default Windows viewer using the preview window."
+                            )
+                        else:
+                            reply = (
+                                "Opened a local, read-only document preview: " +
+                                Path(chosen_path).name +
+                                f" ({details['chars']} extractable characters). "
+                                "Select and copy text from the preview."
+                            )
+                    except Exception as exc:
+                        reply = "I couldn't preview that file: " + str(exc)[:280]
+                    self._save_direct_turn(
+                        chat_id, prompt, reply, event[4], event[5],
+                        event[6], event[7])
+                    if chat_id == self.current_chat and self.pending_message is not None:
+                        self.chat_view.append_to(self.pending_message, reply)
+                        self.chat_view.finish(self.pending_message)
+                        self.pending_message = None
+                    self._set_busy(False)
+                    self._refresh_chat_list()
+                    self._restore_service_status()
+                elif kind == "tool_error":
+                    chat_id, prompt, reply = event[1:4]
+                    self._save_direct_turn(
+                        chat_id, prompt, reply, event[4], event[5],
+                        event[6], event[7])
+                    if chat_id == self.current_chat and self.pending_message is not None:
+                        self.chat_view.append_to(self.pending_message, reply)
+                        self.chat_view.finish(self.pending_message)
+                        self.pending_message = None
+                    self._set_busy(False)
+                    self._refresh_chat_list()
+                    self._restore_service_status()
                 elif kind == "local_tool_done":
                     if event[1] == self.current_chat and self.pending_message is not None:
                         self.chat_view.append_to(self.pending_message, event[2])
@@ -1639,12 +1697,14 @@ class MiloDesktop:
                     self._set_busy(False)
                     self._refresh_chat_list()
                     self._refresh_chat_context()
+                    self._restore_service_status()
                 elif kind == "cancelled":
                     if self.pending_message is not None:
                         self.chat_view.finish(
                             self.pending_message, status="Response cancelled · not saved")
                         self.pending_message = None
                     self._set_busy(False)
+                    self._restore_service_status()
                 elif kind == "error":
                     if self.pending_message is not None:
                         self.chat_view.finish(
