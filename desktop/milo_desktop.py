@@ -304,6 +304,10 @@ class MiloDesktop:
         reconnect.configure(bg=PANEL_BRIGHT, fg=MUTED,
                             padx=12, pady=6, font=(FONT, 9))
         reconnect.pack(side="right", padx=16, pady=17)
+        copy_chat = new_button(heading, "Copy chat", self.copy_conversation)
+        copy_chat.configure(bg=PANEL_BRIGHT, fg=MUTED,
+                            padx=12, pady=6, font=(FONT, 9))
+        copy_chat.pack(side="right", padx=(0, 2), pady=17)
 
         # Compact, avatar-led DM timeline. View-only; conversation logic
         # remains in the original MiloConversation and SQLite store.
@@ -439,6 +443,32 @@ class MiloDesktop:
             save_config(self.config)
             self._refresh_chat_list()
             self._load_chat()
+
+    def copy_conversation(self):
+        """Copy the complete locally stored transcript without contacting a model."""
+        try:
+            rows = self.db.db.execute(
+                "SELECT role,content,created_at FROM conversations "
+                "WHERE chat_id=? ORDER BY id LIMIT 5000",
+                (self.current_chat,)
+            ).fetchall()
+            if not rows:
+                messagebox.showinfo("Copy chat", "This conversation has no saved messages yet.")
+                return
+            lines = []
+            for role, text, date in rows:
+                speaker = (self.config.get("user_name", "You")
+                           if role == "user" else self.config.get("milo_name", "Milo"))
+                lines.append(f"{speaker} ({date}):\n{text}")
+            transcript = "\n\n".join(lines)
+            if len(transcript) > 2_000_000:
+                messagebox.showerror(
+                    "Copy chat", "This conversation is too large for the clipboard.")
+                return
+            self.root.clipboard_clear()
+            self.root.clipboard_append(transcript)
+        except (sqlite3.Error, tk.TclError) as exc:
+            messagebox.showerror("Copy chat", str(exc)[:220])
 
     def new_chat(self):
         if self.busy:
