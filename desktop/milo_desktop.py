@@ -116,8 +116,12 @@ def list_models(base_url: str) -> list[str]:
     data = payload.get("data")
     if not isinstance(data, list):
         raise ValueError("the model endpoint did not return an OpenAI-style model list")
+    # Provider types are independent: never auto-route a conversation to
+    # an image-generation or decision-only model.
     return [x["id"] for x in data if isinstance(x, dict)
-            and isinstance(x.get("id"), str) and x["id"]][:30]
+            and isinstance(x.get("id"), str) and x["id"]
+            and (not isinstance(x.get("capabilities"), list)
+                 or "chat" in x["capabilities"])][:30]
 
 
 class MiloDesktop:
@@ -454,7 +458,7 @@ class MiloDesktop:
             pass
 
     def _avatar(self, widget: tk.Label, setting: str, fallback: str):
-        widget.configure(image="", text=fallback[:1].upper())
+        widget.configure(image="", text=fallback[:1].upper(), width=3, height=1)
         path = self.config.get(setting)
         if not path:
             return
@@ -620,11 +624,12 @@ class MiloDesktop:
         def search():
             root = chosen.get()
             pfx = prefix.get()
+            recursive = bool(recurse.get())  # Read Tk state on the UI thread.
             panel.destroy()
             def worker():
                 try:
                     matches = find_files_by_prefix(
-                        root, pfx, recursive=recurse.get())
+                        root, pfx, recursive=recursive)
                     self.events.put(("file_search", root, matches))
                 except Exception as exc:
                     self.events.put(("file_search_error", str(exc)[:250]))
