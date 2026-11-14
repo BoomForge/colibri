@@ -61,15 +61,15 @@ class AutoDiscoverTests(unittest.TestCase):
             (root / "Blender Foundation" / "Blender.bat").write_text("bad")
             candidates = find_installed_apps(
                 "blender", roots=(root,), registry_entries=[])
-            self.assertEqual([p.path for p in candidates], [blender])
+            self.assertEqual([p.path for p in candidates], [blender.resolve()])
             obs_candidates = find_installed_apps(
                 "OBS Studio", roots=(root,), registry_entries=[])
-            self.assertEqual([p.path for p in obs_candidates], [obs])
+            self.assertEqual([p.path for p in obs_candidates], [obs.resolve()])
             reg_only = find_installed_apps(
                 "Blender", roots=(), registry_entries=[
                     (blender, "Blender 4.5", "Windows App Paths")])
             self.assertEqual(len(reg_only), 1)
-            self.assertEqual(reg_only[0].path, blender)
+            self.assertEqual(reg_only[0].path, blender.resolve())
 
     def test_ambiguous_matches_return_separate_paths(self):
         with tempfile.TemporaryDirectory() as d:
