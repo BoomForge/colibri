@@ -7,7 +7,7 @@ import unittest
 
 from colibri.milo_core.pc_broker import (
     PCActionError, PCPlan, parse_pc_request, execute_pc_plan,
-    register_app, load_apps, remove_app,
+    register_app, load_apps, remove_app, prepare_pc_plan,
 )
 
 
@@ -170,6 +170,54 @@ class BrokerTests(unittest.TestCase):
             execute_pc_plan(parse_pc_request("list open windows"),
                             approved=True, platform="win32", windows=screen_windows
                             ).count("Notepad"), 1)
+
+    def test_file_move_has_complete_approved_preview_and_revalidation(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            downloads, documents = root / "downloads", root / "documents"
+            downloads.mkdir()
+            documents.mkdir()
+            (downloads / "sprite_a.png").write_bytes(b"A")
+            (downloads / "sprite_b.png").write_bytes(b"B")
+            (downloads / "unrelated.png").write_bytes(b"C")
+            roots = {"downloads": downloads, "documents": documents}
+            request = parse_pc_request(
+                'move files containing "sprite" from downloads to documents')
+            self.assertEqual(request.kind, "move_assets")
+            with self.assertRaises(PCActionError):
+                execute_pc_plan(request, approved=True, roots=roots,
+                                platform="win32")
+            previewed = prepare_pc_plan(request, roots=roots)
+            self.assertIn("sprite_a.png", previewed.preview)
+            self.assertIn("sprite_b.png", previewed.preview)
+            self.assertNotIn("unrelated.png", previewed.preview)
+            with self.assertRaises(PermissionError):
+                execute_pc_plan(previewed, roots=roots, platform="win32")
+            result = execute_pc_plan(previewed, approved=True, roots=roots,
+                                     platform="win32")
+            self.assertIn("Moved 2", result)
+            self.assertEqual((documents / "sprite_a.png").read_bytes(), b"A")
+            self.assertEqual((documents / "sprite_b.png").read_bytes(), b"B")
+            self.assertEqual((downloads / "unrelated.png").read_bytes(), b"C")
+
+    def test_file_move_preflight_detects_collision_or_changed_source(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            downloads, documents = root / "downloads", root / "documents"
+            downloads.mkdir()
+            documents.mkdir()
+            src = downloads / "sprite.png"
+            src.write_bytes(b"one")
+            roots = {"downloads": downloads, "documents": documents}
+            plan = prepare_pc_plan(
+                parse_pc_request(
+                    'move files containing "sprite" from downloads to documents'),
+                roots=roots)
+            src.write_bytes(b"different file")
+            with self.assertRaises(Exception):
+                execute_pc_plan(plan, approved=True, roots=roots,
+                                platform="win32")
+            self.assertFalse((documents / "sprite.png").exists())
 
     def test_url_requires_approval_and_valid_https(self):
         observed = []
