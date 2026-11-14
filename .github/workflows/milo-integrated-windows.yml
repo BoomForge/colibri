@@ -14,6 +14,10 @@ on:
       - ".github/workflows/milo-integrated-windows.yml"
   workflow_dispatch:
 
+concurrency:
+  group: milo-integrated-windows-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
