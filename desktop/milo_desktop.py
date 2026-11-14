@@ -385,6 +385,358 @@ class MiloDesktop:
                  bg=BG, fg=MUTED, font=(FONT, 8)).pack(
                      anchor="w", padx=22, pady=(2, 9))
 
+    # ---- Private bot roster, Chat model routing and chat creation ----
+
+    def _installed_model_choices(self):
+        """Only model directories that Colibri has validated can be selected."""
+        return [
+            str(path.relative_to(self.models_root))
+            for path in discover_models(self.models_root)
+        ]
+
+    def _build_bot_sidebar(self):
+        tk.Label(self.bot_side, text="LOCAL ASSISTANTS", bg=SIDEBAR, fg=FG,
+                 font=(FONT, 10, "bold")).pack(
+                     fill="x", anchor="w", padx=15, pady=(22, 3))
+        tk.Label(self.bot_side, text="Private bots · @mentions in shared chat",
+                 bg=SIDEBAR, fg=MUTED, font=(FONT, 8),
+                 wraplength=195, justify="left").pack(
+                     anchor="w", padx=15, pady=(0, 12))
+        tk.Frame(self.bot_side, bg=EDGE, height=1).pack(fill="x", padx=10)
+        self.bot_canvas = tk.Canvas(
+            self.bot_side, bg=SIDEBAR, bd=0, highlightthickness=0)
+        bar = tk.Scrollbar(self.bot_side, orient="vertical",
+                           command=self.bot_canvas.yview, width=9)
+        self.bot_canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        self.bot_canvas.pack(side="top", fill="both", expand=True)
+        self.bot_inner = tk.Frame(self.bot_canvas, bg=SIDEBAR)
+        self.bot_canvas_id = self.bot_canvas.create_window(
+            (0, 0), window=self.bot_inner, anchor="nw")
+        self.bot_inner.bind(
+            "<Configure>",
+            lambda _e: self.bot_canvas.configure(
+                scrollregion=self.bot_canvas.bbox("all")))
+        self.bot_canvas.bind(
+            "<Configure>",
+            lambda e: self.bot_canvas.itemconfigure(
+                self.bot_canvas_id, width=e.width))
+        self.bot_avatar_bank = AvatarBank()
+        self.new_bot_button = new_button(
+            self.bot_side, "＋   Create specialist bot", self._edit_bot_window)
+        self.new_bot_button.configure(bg=SIDEBAR, fg=VIOLET, anchor="w",
+                                      font=(FONT, 9), pady=9)
+        self.new_bot_button.pack(side="bottom", fill="x", padx=10, pady=(7, 12))
+
+    def _bot_avatar_path(self, bot):
+        if bot is None:
+            return (AVATARS / self.config["avatar_milo"]
+                    if self.config.get("avatar_milo") else BRAND_AVATAR)
+        return AVATARS / bot.avatar if bot.avatar else None
+
+    def _bot_row(self, bot_id, name, meta, *, avatar=None, disabled=False):
+        row = tk.Frame(self.bot_inner, bg=SIDEBAR)
+        row.pack(fill="x", padx=(10, 4), pady=(6, 3))
+        portrait = avatar_widget(
+            row, self.bot_avatar_bank, avatar,
+            name, VIOLET if bot_id == "milo" else ORANGE, size=32,
+            background=SIDEBAR)
+        portrait.pack(side="left", padx=(2, 8))
+        col = tk.Frame(row, bg=SIDEBAR)
+        col.pack(side="left", fill="both", expand=True)
+        title = tk.Label(col, text=name[:20], bg=SIDEBAR,
+                         fg=MUTED if disabled else FG, font=(FONT, 9, "bold"),
+                         anchor="w")
+        title.pack(anchor="w")
+        subtitle = tk.Label(col, text=meta[:35], bg=SIDEBAR, fg=MUTED,
+                            font=(FONT, 7), anchor="w", wraplength=165,
+                            justify="left")
+        subtitle.pack(anchor="w", pady=(2, 0))
+        if bot_id == "milo":
+            action = lambda: self._open_main_room()
+        else:
+            action = lambda handle=bot_id: self._open_bot_dm(handle)
+        if not disabled:
+            for widget in (row, portrait, col, title, subtitle):
+                widget.bind("<Button-1>", lambda _e, cb=action: cb())
+                try:
+                    widget.configure(cursor="hand2")
+                except tk.TclError:
+                    pass
+        if bot_id != "milo":
+            edit = new_button(row, "⋯", lambda k=bot_id: self._edit_bot_window(k))
+            edit.configure(bg=SIDEBAR, fg=MUTED, font=(FONT, 11),
+                           padx=3, pady=3)
+            edit.pack(side="right", padx=(2, 0))
+        return row
+
+    def _refresh_bot_sidebar(self):
+        for child in self.bot_inner.winfo_children():
+            child.destroy()
+        self.bot_avatar_bank = AvatarBank()
+        self._bot_row(
+            "milo", self.config.get("milo_name", "Milo"),
+            "MAIN · @milo", avatar=self._bot_avatar_path(None))
+        active_bots = list_bots(self.db.db, include_disabled=True)
+        if not active_bots:
+            tk.Label(
+                self.bot_inner, text="Create your first specialist bot\nfor code, research or another role.",
+                bg=SIDEBAR, fg=MUTED, font=(FONT, 8),
+                justify="left", wraplength=185).pack(
+                    anchor="w", padx=17, pady=(18, 4))
+        for bot in active_bots:
+            self._bot_row(bot.id, bot.name,
+                          ("@" + bot.id + (" · DISABLED" if not bot.active
+                                          else " · PRIVATE DM")),
+                          avatar=self._bot_avatar_path(bot), disabled=not bot.active)
+
+    def _save_bot_avatar(self, source):
+        """Copy a user-selected image into Milo's managed avatar folder."""
+        from PIL import Image
+        original = Path(source)
+        if original.is_symlink() or not original.is_file() or original.stat().st_size > 15_000_000:
+            raise ValueError("Avatar must be a regular image under 15 MB")
+        with Image.open(original) as image:
+            if image.width * image.height > 24_000_000:
+                raise ValueError("Avatar dimensions are too large")
+            image = image.convert("RGBA")
+            image.thumbnail((512, 512), Image.Resampling.LANCZOS)
+            name = uuid.uuid4().hex + ".png"
+            destination = AVATARS / name
+            image.save(destination, format="PNG", optimize=True)
+        return name
+
+    def _edit_bot_window(self, bot_id=None):
+        existing = get_bot(self.db.db, bot_id) if bot_id else None
+        panel = self._panel(
+            "Edit specialist bot" if existing else "Create specialist bot",
+            "Each bot has its own instructions and optional model. "
+            "Specialists do not automatically inherit Milo's private memories.")
+        panel.geometry("635x715")
+        handle = tk.StringVar(value=existing.id if existing else "")
+        display = tk.StringVar(value=existing.name if existing else "")
+        enabled = tk.BooleanVar(value=existing.active if existing else True)
+        avatar_path = [existing.avatar if existing else ""]
+        labels = [
+            ("Handle · used in @mentions (lowercase, no spaces)", handle),
+            ("Display name", display)
+        ]
+        for text, variable in labels:
+            tk.Label(panel, text=text, bg=PANEL, fg=MUTED, font=(FONT, 9)).pack(
+                anchor="w", padx=24, pady=(11, 3))
+            field = tk.Entry(panel, textvariable=variable,
+                             bg=BG, fg=FG, relief="flat", font=(FONT, 11))
+            field.pack(fill="x", padx=24, ipady=8)
+            if existing and variable is handle:
+                field.configure(state="disabled")
+        tk.Label(panel, text="Instructions · what this bot specialises in",
+                 bg=PANEL, fg=MUTED, font=(FONT, 9)).pack(
+                     anchor="w", padx=24, pady=(14, 4))
+        instructions = tk.Text(
+            panel, height=10, wrap="word", bg=BG, fg=FG, insertbackground=FG,
+            font=(FONT, 10), padx=9, pady=8, relief="flat", bd=0)
+        instructions.pack(fill="both", expand=True, padx=24)
+        if existing:
+            instructions.insert("1.0", existing.instructions)
+        tk.Label(panel, text="Preferred model · optional (chat model may override)",
+                 bg=PANEL, fg=MUTED, font=(FONT, 9)).pack(
+                     anchor="w", padx=24, pady=(14, 4))
+        choices = ["Use chat / Milo default"] + self._installed_model_choices()
+        model = tk.StringVar(
+            value=(existing.model_location if existing and existing.model_location
+                   else choices[0]))
+        picker = ttk.Combobox(
+            panel, values=choices, state="readonly",
+            textvariable=model, font=(FONT, 9))
+        picker.pack(fill="x", padx=24, ipady=4)
+        tk.Checkbutton(panel, text="Bot enabled", variable=enabled,
+                       bg=PANEL, fg=FG, selectcolor=BG,
+                       activebackground=PANEL, activeforeground=FG).pack(
+                           anchor="w", padx=24, pady=(10, 5))
+        file_hint = tk.Label(
+            panel, text=("Using custom avatar" if avatar_path[0]
+                         else "No avatar · uses initial badge"),
+            bg=PANEL, fg=MUTED, font=(FONT, 9))
+        file_hint.pack(anchor="w", padx=24)
+        def choose_avatar():
+            path = filedialog.askopenfilename(
+                title="Select bot avatar",
+                filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.gif")],
+                parent=panel)
+            if not path:
+                return
+            try:
+                avatar_path[0] = self._save_bot_avatar(path)
+                file_hint.configure(text="Custom avatar saved locally")
+            except Exception as exc:
+                messagebox.showerror("Bot avatar", str(exc)[:280], parent=panel)
+        new_button(panel, "Choose avatar image", choose_avatar).pack(
+            anchor="w", padx=24, pady=(7, 4))
+        def save():
+            try:
+                handle_id = handle.get().strip().lower()
+                raw_instructions = instructions.get("1.0", "end-1c").strip()
+                chosen_model = ("" if model.get() == choices[0] else model.get())
+                if chosen_model and chosen_model not in self._installed_model_choices():
+                    raise ValueError("Preferred model is no longer installed")
+                profile = Bot(
+                    handle_id, display.get().strip(), raw_instructions,
+                    chosen_model, avatar_path[0], bool(enabled.get()))
+                save_bot(self.db.db, profile)
+                panel.destroy()
+                self._refresh_bot_sidebar()
+                self._refresh_chat_context()
+            except (ValueError, sqlite3.Error) as exc:
+                messagebox.showerror("Bot settings", str(exc)[:320], parent=panel)
+        new_button(panel, "Save bot", save, primary=True).pack(
+            fill="x", padx=24, pady=(14, 18))
+
+    def _open_main_room(self):
+        if self.busy:
+            return
+        if chat_settings(self.db.db, self.current_chat).kind == "room":
+            return
+        rows = self.db.db.execute(
+            "SELECT chat_id FROM chat_settings WHERE kind='room' "
+            "ORDER BY rowid DESC LIMIT 1").fetchall()
+        if rows:
+            self._select_chat(rows[0][0])
+        else:
+            self._start_chat("room", "milo", "")
+
+    def _open_bot_dm(self, bot_id):
+        if self.busy:
+            return
+        bot = get_bot(self.db.db, bot_id)
+        if bot is None or not bot.active:
+            messagebox.showinfo(
+                "Specialist bot", "This bot is disabled; edit it to enable messaging.")
+            return
+        rows = self.db.db.execute(
+            "SELECT chat_id FROM chat_settings WHERE kind='private' "
+            "AND bot_id=? ORDER BY rowid DESC LIMIT 1", (bot_id,)).fetchall()
+        if rows:
+            self._select_chat(rows[0][0])
+        else:
+            self._start_chat("private", bot_id, "")
+
+    def _start_chat(self, kind, bot_id, model_location):
+        if self.busy:
+            return
+        fresh = uuid.uuid4().hex
+        set_chat_settings(
+            self.db.db, ChatSettings(fresh, kind, bot_id, model_location))
+        self.current_chat = fresh
+        self.config["current_chat"] = fresh
+        save_config(self.config)
+        self._refresh_chat_list()
+        self._load_chat()
+        self._refresh_chat_context()
+        self._ensure_chat_model()
+
+    def _model_label(self, selected):
+        return selected.split("/")[-1].split("\\")[-1][:38] if selected else "Use default"
+
+    def _refresh_chat_context(self):
+        if not hasattr(self, "chat_model_var"):
+            return
+        settings = chat_settings(self.db.db, self.current_chat)
+        bot = (get_bot(self.db.db, settings.bot_id)
+               if settings.kind == "private" and settings.bot_id != "milo" else None)
+        if bot is not None:
+            self.milo_title.configure(text=bot.name)
+            self.persona_status_label.configure(text="SPECIALIST BOT", fg=ORANGE)
+            self.channel_label.configure(text="PRIVATE · @" + bot.id)
+            image_path = self._bot_avatar_path(bot)
+            self.chat_view.names["assistant"] = bot.name
+            self.chat_view.paths["assistant"] = image_path
+            self._header_bot_icon(image_path, bot.name)
+        else:
+            self.milo_title.configure(text=self.config.get("milo_name", "Milo"))
+            restored = loaded_persona(self.db.db) is not None
+            self.persona_status_label.configure(
+                text="RESTORED PROFILE" if restored else "BASE PROFILE",
+                fg=COLORS["green"] if restored else VIOLET)
+            self.channel_label.configure(
+                text="SHARED · @MENTION BOTS" if settings.kind == "room"
+                else "PRIVATE · @milo")
+            self.chat_view.names["assistant"] = self.config.get("milo_name", "Milo")
+            self.chat_view.paths["assistant"] = self._bot_avatar_path(None)
+            self._avatar(self.milo_icon, "avatar_milo", self.config["milo_name"])
+        installed = self._installed_model_choices()
+        default_display = "Auto · bot/Milo default"
+        self.model_option_map = {default_display: ""}
+        for index, path in enumerate(installed):
+            label = self._model_label(path)
+            if label in self.model_option_map:
+                label += " #" + str(index + 1)
+            self.model_option_map[label] = path
+        options = list(self.model_option_map)
+        self.model_selector.configure(values=options,
+                                     state="readonly" if installed else "disabled")
+        current = next(
+            (label for label, value in self.model_option_map.items()
+             if value == settings.model_location), default_display)
+        self.chat_model_var.set(current)
+        current_bot = bot if bot is not None else None
+        effective = model_for_turn(
+            settings, current_bot, self.config.get("model_location", ""))
+        self.chat_model_hint.configure(
+            text=self._model_label(effective) if effective else "No model")
+
+    def _header_bot_icon(self, path, fallback):
+        if not path or not Path(path).is_file():
+            self.milo_icon.configure(image="", text=fallback[:1].upper(),
+                                     width=3, height=1)
+            return
+        try:
+            picture = tk.PhotoImage(file=path)
+            factor = max(1, (max(picture.width(), picture.height()) + 49) // 50)
+            picture = picture.subsample(factor)
+            self.images["bot_header"] = picture
+            self.milo_icon.configure(image=picture, text="",
+                                     width=50, height=50)
+        except (OSError, tk.TclError):
+            self.milo_icon.configure(image="", text=fallback[:1].upper())
+
+    def _select_chat_model(self, _event=None):
+        if self.busy or self.engine_starting:
+            messagebox.showinfo(
+                "Model", "Finish the current response or model load before switching.")
+            self._refresh_chat_context()
+            return
+        model_location = self.model_option_map.get(self.chat_model_var.get())
+        if model_location is None:
+            self._refresh_chat_context()
+            return
+        settings = chat_settings(self.db.db, self.current_chat)
+        set_chat_settings(
+            self.db.db, ChatSettings(
+                self.current_chat, settings.kind, settings.bot_id, model_location))
+        self._refresh_chat_context()
+        self._ensure_chat_model()
+
+    def _ensure_chat_model(self):
+        settings = chat_settings(self.db.db, self.current_chat)
+        bot = (get_bot(self.db.db, settings.bot_id)
+               if settings.kind == "private" and settings.bot_id != "milo" else None)
+        selected = model_for_turn(
+            settings, bot, self.config.get("model_location", ""))
+        if self.engine_starting:
+            return
+        if selected:
+            path = chosen_model(self.models_root, selected)
+            if path is None:
+                self.connection_label.configure(
+                    text="Model not installed · Select a different checkpoint", fg=ORANGE)
+                self.model_ready = False
+                return
+            if self.active_model_location == selected and self.model_ready:
+                return
+            self._launch_managed_model(path)
+        elif not self.model_ready:
+            self.check_connection()
+
     def toggle_advanced(self):
         self.advanced_open = not self.advanced_open
         self.advanced_toggle.configure(
