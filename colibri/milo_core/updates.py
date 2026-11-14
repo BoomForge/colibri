@@ -20,7 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-CURRENT_VERSION = "0.9.5"
+CURRENT_VERSION = "0.9.6"
 REPOSITORY = "BoomForge/colibri"
 RELEASES_API = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
 MAX_INSTALLER = 500 * 1024 * 1024
