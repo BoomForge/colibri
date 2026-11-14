@@ -29,6 +29,10 @@ from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
 from colibri.milo_core.filesystem import find_files_by_prefix
 from colibri.milo_core.chat_files import parse_file_query, answer_file_query
+from colibri.milo_core.model_catalog import (
+    MODEL_PAGE, ModelDownloadError, inspect_abliterated_release,
+    download_abliterated,
+)
 from colibri.milo_core.local_engine import (
     LocalEngine, EngineStartupError, chosen_model, discover_models,
     install_root, managed_models_root, model_valid,
@@ -182,6 +186,8 @@ class MiloDesktop:
         self.events: queue.Queue[tuple] = queue.Queue()
         self.busy = False
         self.cancel = threading.Event()
+        self.model_download_cancel = threading.Event()
+        self.model_download_active = False
         self.models: list[str] = []
         self.images = {}
         self.release_candidate = None
@@ -682,6 +688,20 @@ class MiloDesktop:
                     self.config["backend"] = event[2]
                     save_config(self.config)
                     self.check_connection()
+                elif kind == "model_download_progress":
+                    self.connection_label.configure(
+                        text=f"Downloading optional Qwen model  •  {event[1]}%",
+                        fg=ORANGE)
+                elif kind == "model_download_done":
+                    self.model_download_active = False
+                    self._import_loose_gguf(
+                        Path(event[1]), event[2], parent=None)
+                elif kind == "model_download_error":
+                    self.model_download_active = False
+                    self.connection_label.configure(
+                        text="Optional model download interrupted  •  Open Models",
+                        fg=ORANGE)
+                    messagebox.showerror("Optional Qwen model", event[1])
                 elif kind == "model_imported":
                     relative = event[1]
                     self.config["model_location"] = relative
@@ -984,6 +1004,8 @@ class MiloDesktop:
             rel = str(model.relative_to(self.models_root))
             marker = "●  " if rel == self.config.get("model_location") else "   "
             label = marker + rel
+            if "abliterat" in rel.casefold():
+                label += "   ·   ABLITERATED"
             if kind == "gguf":
                 label += "   ·   GGUF  [Import metadata]"
             items.insert("end", label)
@@ -1128,6 +1150,54 @@ class MiloDesktop:
                 self._import_loose_gguf(Path(selected), backend.get(), parent=panel)
         new_button(actions, "Import GGUF file", import_gguf_file).pack(
             side="left", padx=(8, 0))
+        variant_row = tk.Frame(panel, bg=PANEL)
+        variant_row.pack(fill="x", padx=24, pady=(4, 10))
+        def start_variant_download():
+            if self.model_download_active or self.busy or self.engine_starting:
+                messagebox.showinfo(
+                    "Milo models",
+                    "Finish your current response or download first.", parent=panel)
+                return
+            if not messagebox.askyesno(
+                "Optional abliterated Qwen model",
+                "Download an experimental community-modified version of "
+                "Qwen3-4B-Instruct-2507 (GGUF Q4_K_M, approximately 2.5 GB)?\n\n"
+                "It reduces refusal behaviour but is NOT guaranteed to be more accurate "
+                "or universally unrestricted. Your standard Qwen model and conversations "
+                "remain unchanged. The published SHA-256 is verified after download.\n\n"
+                "Source: " + MODEL_PAGE + "\n\nContinue?",
+                parent=panel):
+                return
+            chosen_backend = backend.get()
+            self.model_download_cancel.clear()
+            self.model_download_active = True
+            self.connection_label.configure(
+                text="Downloading optional Qwen abliterated model...", fg=ORANGE)
+            def download_worker():
+                try:
+                    asset = inspect_abliterated_release()
+                    progress_sent = -1
+                    def progress(done, size):
+                        nonlocal progress_sent
+                        pct = int(done * 100 / size)
+                        if pct // 5 != progress_sent:
+                            progress_sent = pct // 5
+                            self.events.put(("model_download_progress", pct))
+                    installed = download_abliterated(
+                        asset, self.models_root, on_progress=progress,
+                        cancel=self.model_download_cancel)
+                    self.events.put(("model_download_done", str(installed), chosen_backend))
+                except Exception as exc:
+                    self.events.put(("model_download_error", str(exc)[:350]))
+            threading.Thread(
+                target=download_worker, name="milo-optional-model-download",
+                daemon=True).start()
+        new_button(
+            variant_row, "Download Qwen3-4B Abliterated (optional)",
+            start_variant_download).pack(side="left", padx=(0, 8))
+        new_button(
+            variant_row, "Cancel download",
+            self.model_download_cancel.set).pack(side="left")
         folder_actions = tk.Frame(panel, bg=PANEL)
         folder_actions.pack(fill="x", padx=24, pady=(0, 14))
         new_button(
@@ -1632,6 +1702,7 @@ class MiloDesktop:
 
     def _close(self):
         self.cancel.set()
+        self.model_download_cancel.set()
         self.engine.stop()
         try:
             self.db.close()
