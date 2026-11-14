@@ -10,7 +10,7 @@ import sqlite3
 
 TOOLS = frozenset({
     "web_research", "local_file_search", "local_preview",
-    "screen_capture", "quick_chat",
+    "screen_capture", "quick_chat", "windows_settings",
 })
 OUTCOMES = frozenset({
     "approved", "denied", "started", "completed", "failed", "cancelled",
