@@ -3711,6 +3711,28 @@ def ui_self_test() -> int:
             assert app.advanced_open
             app.toggle_advanced()
             mark("after sidebar")
+            # The real images must load from bundled installation paths,
+            # not just exist as placeholder names in the database.
+            from PIL import Image as PillowImage
+            for internal_id, alias, display in (
+                ("research", "sage", "Sage"),
+                ("webdev", "nova", "Nova"),
+                ("gamedev", "forge", "Forge"),
+            ):
+                bot = get_bot(app.db.db, internal_id)
+                assert bot is not None and bot.name == display, (
+                    "Specialist identity migration failed: " + alias)
+                avatar = app._bot_avatar_path(bot)
+                assert avatar and avatar.is_file(), (
+                    "Bundled " + alias + " image missing in native app")
+                with PillowImage.open(avatar) as portrait:
+                    portrait.verify()
+                target, stripped = resolve_target(
+                    app.db.db, "@" + alias + " hello",
+                    ChatSettings("avatar-smoke"))
+                assert target == internal_id and stripped == "hello", (
+                    "Mention routing failed for @" + alias)
+            mark("after bundled specialist avatars and mention routing")
             # Exercise the ACTUAL native menu command after the popup handler
             # returns. Previous code destroyed this menu immediately, so a
             # right-click visibly offered Delete but never ran the action.
