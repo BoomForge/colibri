@@ -53,7 +53,11 @@ def parse_timestamp(value: str | datetime | None) -> datetime:
 
 def natural_time(value: str | datetime | None, now: datetime | None = None) -> str:
     date = parse_timestamp(value)
-    now = (now or datetime.now().astimezone()).astimezone()
+    reference = now or datetime.now().astimezone()
+    if reference.tzinfo is None:
+        reference = reference.astimezone()
+    date = date.astimezone(reference.tzinfo)
+    now = reference
     clock = date.strftime("%I:%M %p").lstrip("0")
     delta = (now.date() - date.date()).days
     if delta == 0:
@@ -65,7 +69,11 @@ def natural_time(value: str | datetime | None, now: datetime | None = None) -> s
 
 def day_label(value: str | datetime | None, now: datetime | None = None) -> str:
     date = parse_timestamp(value)
-    now = (now or datetime.now().astimezone()).astimezone()
+    reference = now or datetime.now().astimezone()
+    if reference.tzinfo is None:
+        reference = reference.astimezone()
+    date = date.astimezone(reference.tzinfo)
+    now = reference
     delta = (now.date() - date.date()).days
     if delta == 0:
         return "TODAY"
