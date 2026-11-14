@@ -3804,6 +3804,13 @@ def ui_self_test() -> int:
             assert app.advanced_open
             app.toggle_advanced()
             mark("after sidebar")
+            # The frozen installer must include pystray's native Windows backend,
+            # not merely compile the lazy-loading tray wrapper successfully.
+            if getattr(sys, "frozen", False) and sys.platform == "win32":
+                import pystray
+                from pystray import _win32 as tray_win32
+                assert pystray.Icon and tray_win32, (
+                    "Frozen app has no native Windows notification-area backend")
             # Never hide the app unless a healthy system tray can restore it.
             # Fake readiness tests Tk's actual withdraw/deiconify lifecycle
             # without running a shell tray host in CI.
