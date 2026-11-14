@@ -51,15 +51,58 @@ def managed_models_root(root: Path | None = None) -> Path:
 def model_valid(path: Path) -> bool:
     if not path.is_dir() or path.is_symlink():
         return False
-    # Colibri's CLI/gateway needs config and tokenizer in the model directory.
+    # Colibri's gateway needs generated config + tokenizer. A GGUF imported
+    # with the first-party --mode link has gguf.json rather than local weights.
     if not (path / "config.json").is_file() or not (path / "tokenizer.json").is_file():
         return False
-    # Do not auto-register empty folders or partial downloads.
-    return any(
+    weights = any(
         file.is_file() and not file.is_symlink() and
         file.suffix.lower() in {".gguf", ".safetensors", ".bin"}
         for file in path.iterdir()
     )
+    if weights:
+        return True
+    pointer = path / "gguf.json"
+    if pointer.is_symlink() or not pointer.is_file():
+        return False
+    try:
+        import json
+        obj = json.loads(pointer.read_text(encoding="utf-8"))
+        source = obj.get("source")
+        if not isinstance(source, str) or not source:
+            return False
+        file = Path(source)
+        return file.is_file() and not file.is_symlink() and file.suffix.lower() == ".gguf"
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def discover_loose_gguf(models_root: Path) -> list[Path]:
+    """Find GGUF weights waiting for local in-place Colibri metadata import."""
+    root = models_root.resolve(strict=True)
+    result: list[Path] = []
+    pending = [(root, 0)]
+    while pending:
+        directory, depth = pending.pop()
+        if depth > 2:
+            continue
+        for child in directory.iterdir():
+            if child.is_symlink():
+                continue
+            if child.is_file() and child.suffix.lower() == ".gguf" and child.stat().st_size >= 24:
+                result.append(child)
+            elif child.is_dir() and depth < 2 and child.resolve().is_relative_to(root):
+                pending.append((child, depth + 1))
+    return sorted(result, key=lambda p: str(p).casefold())
+
+
+def gguf_target(models_root: Path, weight: Path) -> Path:
+    root = models_root.resolve(strict=True)
+    file = weight.resolve(strict=True)
+    if not file.is_relative_to(root) or file.suffix.lower() != ".gguf":
+        raise ValueError("GGUF must first be stored under Milo Models")
+    # The output must not be the same name as a user-owned directory.
+    return file.parent / (file.stem + ".colibri")
 
 
 def discover_models(models_root: Path) -> list[Path]:
