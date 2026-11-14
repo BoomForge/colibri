@@ -10,7 +10,7 @@ Unicode True
 !define MUI_UNICON "..\assets\Milo.ico"
 
 Name "${PRODUCT}"
-OutFile "Milo-Setup-${VERSION}.exe"
+OutFile "..\..\Milo-Setup-${VERSION}.exe"
 InstallDir "$LOCALAPPDATA\Programs\Milo"
 InstallDirRegKey HKCU "Software\Pixelwolf\Milo" "InstallDir"
 RequestExecutionLevel user
