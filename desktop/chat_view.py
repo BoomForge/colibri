@@ -289,7 +289,7 @@ class ChatView(tk.Frame):
             who.pack(side="left", padx=(0, 7))
             badge = tk.Label(header, text="LOCAL AI" if role == "assistant" else "YOU",
                              bg=COLORS["chip"] if role == "assistant" else COLORS["header"],
-                             fg=COLORS["milo" if role == "assistant" else COLORS["muted"]],
+                             fg=COLORS["milo" if role == "assistant" else "muted"],
                              font=(FONT, 7, "bold"), padx=5, pady=2)
             badge.pack(side="left", padx=(0, 8))
             tk.Label(header, text=natural_time(date), bg=self.bg_color,
