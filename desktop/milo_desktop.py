@@ -607,6 +607,163 @@ class MiloDesktop:
         self._avatar(self.user_icon, "avatar_user", self.config["user_name"])
         self._avatar(self.milo_icon, "avatar_milo", self.config["milo_name"])
 
+    def models_window(self):
+        panel = self._panel(
+            "Local models",
+            "Models stay in Milo's Models folder. The engine starts automatically.")
+        tk.Label(panel, text="Model storage", bg=PANEL, fg=MUTED).pack(
+            anchor="w", padx=24, pady=(10, 2))
+        location = tk.Entry(
+            panel, bg=BG, fg=FG, relief="flat", font=(FONT, 9))
+        location.insert(0, str(self.models_root))
+        location.configure(state="readonly",
+                           readonlybackground=BG, highlightthickness=0)
+        location.pack(fill="x", padx=24, ipady=6)
+
+        tk.Label(panel, text="Installed models", bg=PANEL, fg=MUTED).pack(
+            anchor="w", padx=24, pady=(15, 4))
+        found = discover_models(self.models_root)
+        items = tk.Listbox(
+            panel, bg=BG, fg=FG, font=(FONT, 10), height=9,
+            selectbackground=EDGE, activestyle="none", relief="flat")
+        items.pack(fill="both", expand=True, padx=24, pady=(0, 7))
+        for index, model in enumerate(found):
+            rel = str(model.relative_to(self.models_root))
+            marker = "●  " if rel == self.config.get("model_location") else "   "
+            items.insert("end", marker + rel)
+            if rel == self.config.get("model_location"):
+                items.selection_set(index)
+        if not found:
+            items.insert("end", "No compatible model folders found yet.")
+
+        backend = tk.StringVar(value=self.config.get("backend", "vulkan"))
+        choices = tk.Frame(panel, bg=PANEL)
+        choices.pack(fill="x", padx=24, pady=(8, 5))
+        tk.Label(choices, text="Compute backend", bg=PANEL,
+                 fg=MUTED).pack(side="left", padx=(0, 12))
+        for name, value in (("Vulkan GPU", "vulkan"), ("CPU", "cpu")):
+            tk.Radiobutton(choices, text=name, value=value, variable=backend,
+                           bg=PANEL, fg=FG, selectcolor=BG,
+                           activebackground=PANEL, activeforeground=FG).pack(
+                               side="left", padx=(0, 10))
+
+        def select():
+            if self.busy or self.engine_starting:
+                messagebox.showinfo(
+                    "Milo", "Finish the current inference or model load first.",
+                    parent=panel)
+                return
+            indexes = items.curselection()
+            if not indexes or indexes[0] >= len(found):
+                messagebox.showinfo("Milo", "Select a model folder first.",
+                                    parent=panel)
+                return
+            selected = found[indexes[0]]
+            if not model_valid(selected):
+                messagebox.showerror(
+                    "Milo", "This model folder is incomplete.",
+                    parent=panel)
+                return
+            self.config["model_location"] = str(
+                selected.relative_to(self.models_root))
+            self.config["backend"] = backend.get()
+            self.config["model_directory"] = str(self.models_root)
+            save_config(self.config)
+            panel.destroy()
+            self.check_connection()
+
+        def add():
+            if self.busy or self.engine_starting:
+                messagebox.showinfo("Milo", "Finish the current response first.",
+                                    parent=panel)
+                return
+            chosen = filedialog.askdirectory(
+                title="Choose an existing Colibri model folder", parent=panel)
+            if not chosen:
+                return
+            source = Path(chosen).resolve()
+            if not model_valid(source):
+                messagebox.showerror(
+                    "Not a complete model",
+                    "Choose the model folder containing config.json, tokenizer.json "
+                    "and GGUF or Safetensors weights. A single GGUF file on its own "
+                    "is not sufficient for Colibri's model gateway.",
+                    parent=panel)
+                return
+            try:
+                if source.is_relative_to(self.models_root.resolve()):
+                    # Nothing to copy; simply select the managed model.
+                    self.config["model_location"] = str(
+                        source.relative_to(self.models_root.resolve()))
+                    self.config["backend"] = backend.get()
+                    save_config(self.config)
+                    panel.destroy()
+                    self.check_connection()
+                    return
+            except ValueError:
+                pass
+            dest = self.models_root / source.name
+            if dest.exists():
+                messagebox.showerror(
+                    "Already installed",
+                    "A model with this folder name already exists. "
+                    "Rename the source folder or choose the installed copy.",
+                    parent=panel)
+                return
+            if not messagebox.askyesno(
+                "Import model",
+                "Copy the selected model into:\n" + str(dest) +
+                "\n\nModel weights may require several gigabytes of disk space. "
+                "The existing model will not be removed.",
+                parent=panel):
+                return
+            self.connection_label.configure(
+                text="Copying model weights to Models  •  " + source.name,
+                fg=ORANGE)
+            panel.destroy()
+            requested_backend = backend.get()
+            def worker():
+                scratch = self.models_root / (
+                    "." + source.name + ".importing-" + uuid.uuid4().hex[:8])
+                try:
+                    size = 0
+                    for directory, dirs, files in os.walk(source, followlinks=False):
+                        for folder in dirs:
+                            if (Path(directory) / folder).is_symlink():
+                                raise ValueError("symlinked model directories cannot be imported")
+                        for filename in files:
+                            full = Path(directory) / filename
+                            if full.is_symlink() or not full.is_file():
+                                raise ValueError("symlinked model weight files cannot be imported")
+                            size += full.stat().st_size
+                    free = shutil.disk_usage(self.models_root).free
+                    if size + (512 << 20) > free:
+                        raise OSError(
+                            "not enough free disk space to copy model and retain a 512 MiB reserve")
+                    shutil.copytree(source, scratch)
+                    if not model_valid(scratch):
+                        raise ValueError("imported model failed post-copy validation")
+                    scratch.rename(dest)  # Make completed imports visible atomically.
+                    self.config["backend"] = requested_backend
+                    self.events.put(("model_imported", dest.name))
+                except Exception as exc:
+                    self.events.put(("model_import_error", str(exc)[:320]))
+                finally:
+                    if scratch.exists():
+                        shutil.rmtree(scratch, ignore_errors=True)
+            threading.Thread(target=worker, name="milo-import-model", daemon=True).start()
+
+        actions = tk.Frame(panel, bg=PANEL)
+        actions.pack(fill="x", padx=24, pady=12)
+        new_button(actions, "Use selected model", select, primary=True).pack(
+            side="left", padx=(0, 8))
+        new_button(actions, "Import existing model", add).pack(side="left")
+        new_button(
+            panel, "Open Models folder",
+            lambda: os.startfile(str(self.models_root))
+            if sys.platform == "win32" else None,
+        ).pack(fill="x", padx=24, pady=(0, 14))
+
     def restore_milo_personality(self):
         """Private, approved local import; no GitHub upload or model training."""
         if self.busy:
