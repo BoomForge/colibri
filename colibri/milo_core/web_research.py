@@ -66,10 +66,15 @@ def _safe_url(value: str) -> str:
         raise ResearchError("invalid source URL")
     parts = urlsplit(value)
     host = parts.hostname
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ResearchError("invalid HTTPS source port") from exc
     if (parts.scheme != "https" or not host or parts.username or parts.password
-            or parts.port not in {None, 443} or parts.fragment):
+            or port not in {None, 443} or parts.fragment):
         raise ResearchError("Only public HTTPS sources are supported")
-    if host.lower().endswith((".local", ".internal", ".localhost", ".test")):
+    if (host.lower() == "localhost" or
+            host.lower().endswith((".local", ".internal", ".localhost", ".test"))):
         raise ResearchError("Private/internal hosts cannot be fetched")
     try:
         literal = ipaddress.ip_address(host)
