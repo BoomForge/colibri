@@ -1,0 +1,30 @@
+name: Milo isolated core
+
+on:
+  push:
+    branches:
+      - feature/milo-**
+    paths:
+      - "colibri/milo_core/**"
+      - "tests/test_milo_core.py"
+      - ".github/workflows/milo-core.yml"
+  pull_request:
+    paths:
+      - "colibri/milo_core/**"
+      - "tests/test_milo_core.py"
+      - ".github/workflows/milo-core.yml"
+
+jobs:
+  synthetic-regressions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Milo core
+        run: python -m compileall -q colibri/milo_core
+      - name: Run Milo synthetic regressions
+        run: python -m unittest discover -s tests -p test_milo_core.py -v
