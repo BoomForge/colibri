@@ -38,6 +38,7 @@ class MiloConversation:
         shared_room: bool = False,
         research_context: str = "",
         answer_suffix: str = "",
+        local_attachment_context: str = "",
     ) -> None:
         if not 0 <= history_limit <= 40:
             raise ValueError("history_limit must be between 0 and 40")
@@ -51,6 +52,7 @@ class MiloConversation:
         self.shared_room = shared_room
         self.research_context = research_context[:16000]
         self.answer_suffix = answer_suffix[:5500]
+        self.local_attachment_context = local_attachment_context[:15000]
 
     def _messages(self, chat_id: str, user_text: str) -> list[dict[str, str]]:
         is_milo = self.bot_id == "milo"
@@ -104,6 +106,8 @@ class MiloConversation:
             system += "\n\n" + reference
         if self.research_context:
             system += "\n\n" + self.research_context
+        if self.local_attachment_context:
+            system += "\n\n" + self.local_attachment_context
         messages = [{"role": "system", "content": system}]
         if self.shared_room:
             messages.extend(recent_for_bot(
