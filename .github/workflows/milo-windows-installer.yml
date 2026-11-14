@@ -187,6 +187,14 @@ jobs:
             exit 0
           }
           gh release view "milo-v0.8.0" --repo BoomForge/colibri 2>$null | Out-Null
-          if ($LASTEXITCODE -eq 0) { Write-Host "Version already published"; exit 0 }
-          gh release create "milo-v0.8.0" "Milo-Setup-0.8.0.exe" "milo-module-system_info-0.1.0.zip" "milo-modules.json" --repo BoomForge/colibri --target "$env:GITHUB_SHA" --prerelease --title "Milo 0.8.0 Windows Installer" --notes "Milo 0.8.0: latest-message chat scroll, scroll-aware output follow, right-click confirmed conversation deletion; enhanced local image/document previews with zoom, rotate and Windows Open With; native file drag-and-drop and document context; editable Research, WebDev and GameDev presets with Harvard references and verified source-domain filtering; optional SHA-checked Qwen3 Thinking model for Research. Unsigned preview; private data and model weights never bundled."
-          if ($LASTEXITCODE -ne 0) { Write-Warning "Release publishing unavailable; CI installer remains available." }
+          $exists = ($LASTEXITCODE -eq 0)
+          if ($exists) {
+            Write-Host "Updating release with installer from verified current branch tip $env:GITHUB_SHA"
+            gh release upload "milo-v0.8.0" "Milo-Setup-0.8.0.exe" "milo-module-system_info-0.1.0.zip" "milo-modules.json" --repo BoomForge/colibri --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Failed to replace release assets" }
+            gh release edit "milo-v0.8.0" --repo BoomForge/colibri --target "$env:GITHUB_SHA"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to refresh release metadata" }
+          } else {
+            gh release create "milo-v0.8.0" "Milo-Setup-0.8.0.exe" "milo-module-system_info-0.1.0.zip" "milo-modules.json" --repo BoomForge/colibri --target "$env:GITHUB_SHA" --prerelease --title "Milo 0.8.0 Windows Installer" --notes "Milo 0.8.0: latest-message chat scroll, scroll-aware output follow, right-click confirmed conversation deletion; enhanced local image/document previews with zoom, rotate and Windows Open With; native file drag-and-drop and document context; editable Research, WebDev and GameDev presets with Harvard references and verified source-domain filtering; optional SHA-checked Qwen3 Thinking model for Research. Unsigned preview; private data and model weights never bundled."
+            if ($LASTEXITCODE -ne 0) { throw "Release publishing unavailable; installer remains in CI artifact." }
+          }
