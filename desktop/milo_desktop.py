@@ -66,7 +66,7 @@ from colibri.milo_core.web_research import (
     ResearchError, init_web_prefs, web_enabled,
     set_web_enabled, wants_research, query_for_research,
     search_public_web, source_context, source_footer,
-    search_results_reply,
+    search_results_reply, harvard_references,
 )
 from colibri.milo_core.bots import (
     Bot, ChatSettings, attributed_messages, chat_settings,
@@ -1359,7 +1359,8 @@ class MiloDesktop:
         # Explicit web requests route through a real search tool, even if no
         # specialist exists. Milo's own web capability requires this exact
         # per-request confirmation; specialists additionally need their toggle.
-        if wants_research(clean_prompt):
+        if (wants_research(clean_prompt) or
+                (target_id == "research" and len(clean_prompt.strip()) >= 3)):
             if target_id != "milo" and not web_enabled(self.db.db, target_id):
                 messagebox.showinfo(
                     "Internet research disabled",
@@ -1368,7 +1369,9 @@ class MiloDesktop:
                     "Every actual search will still require approval.")
                 return
             try:
-                query = query_for_research(clean_prompt)
+                query = (query_for_research(clean_prompt)
+                         if wants_research(clean_prompt)
+                         else clean_prompt.strip()[:240])
             except ResearchError as exc:
                 messagebox.showerror("Web research", str(exc)[:260])
                 return
@@ -1413,7 +1416,9 @@ class MiloDesktop:
                                 bot_avatar=bot.avatar if bot else "",
                                 shared_room=(settings.kind == "room"),
                                 research_context=source_context(results),
-                                answer_suffix=source_footer(results))
+                                answer_suffix=(harvard_references(results)
+                                               if target_id == "research"
+                                               else source_footer(results)))
                             chunks = conversation.stream_reply(
                                 clean_prompt, chat_id=chat_id,
                                 stored_user_text=prompt)
@@ -1430,6 +1435,8 @@ class MiloDesktop:
                         # The web tool can still give grounded clickable
                         # sources while Colibri is offline or changing models.
                         reply = search_results_reply(query, results)
+                        if target_id == "research":
+                            reply += harvard_references(results)
                         if self.cancel.is_set():
                             self.events.put(("cancelled", chat_id))
                             return
