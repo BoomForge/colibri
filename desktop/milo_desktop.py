@@ -30,6 +30,9 @@ except ImportError:
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from desktop.chat_view import ChatView, ConversationList, COLORS, avatar_widget, AvatarBank
 
+from colibri.milo_core.vision import (
+    OllamaLocalVision, VisionError, vision_context,
+)
 from colibri.milo_core.windows_actions import (
     WindowsAction, available_actions, parse_action_request, execute_action,
 )
@@ -131,6 +134,9 @@ DEFAULTS = {
     "model_location": "",
     "backend": "vulkan",
     "global_shortcut": "on",
+    "vision_enabled": "off",
+    "vision_model": "qwen3-vl:2b",
+    "vision_endpoint": "http://127.0.0.1:11434",
 }
 
 
@@ -1873,6 +1879,7 @@ class MiloDesktop:
         # when a real chat turn is submitted. Attachments are not uploaded.
         staged = []
         local_context = ""
+        vision_job = None
         if self.queued_attachments:
             try:
                 staged = stage_attachments(
@@ -1881,14 +1888,55 @@ class MiloDesktop:
             except (AttachmentError, OSError, ValueError) as exc:
                 messagebox.showerror("Attachment", str(exc)[:300])
                 return
-            if has_images and not messagebox.askokcancel(
-                "Image understanding not installed",
-                "The local model currently running is a text-only checkpoint. "
-                "Milo can preview your image, but cannot analyse its pixels yet. "
-                "Continue with text-only document context?"):
-                for item in staged:
-                    item.path.unlink(missing_ok=True)
-                return
+            if has_images:
+                image_items = [item for item in staged if item.kind == "image"]
+                vision_allowed = (
+                    module_enabled(DATA_DIR, "vision")
+                    and self.config.get("vision_enabled", "off") == "on")
+                if vision_allowed and len(image_items) <= 3:
+                    try:
+                        backend = OllamaLocalVision(
+                            model=self.config.get("vision_model", ""),
+                            endpoint=self.config.get("vision_endpoint", ""))
+                    except ValueError as exc:
+                        messagebox.showerror("Local vision settings",
+                                             str(exc), parent=self.root)
+                        for item in staged:
+                            item.path.unlink(missing_ok=True)
+                        return
+                    approved = messagebox.askyesno(
+                        "Run local image analysis",
+                        "Send " + str(len(image_items)) +
+                        " selected image(s) and only this message to the "
+                        "configured LOCAL Ollama service?\n\n" +
+                        backend.endpoint + "\nModel: " + backend.model +
+                        "\n\nNothing is sent to a cloud provider. "
+                        "The resulting description will be passed to Milo's "
+                        "normal chat model as attributed evidence. "
+                        "No desktop actions will be taken.",
+                        parent=self.root)
+                    self._audit("vision_inference",
+                                "approved" if approved else "denied")
+                    if approved:
+                        vision_job = (backend, image_items)
+                        self._tool_begin("vision_inference")
+                    else:
+                        for item in staged:
+                            item.path.unlink(missing_ok=True)
+                        return
+                else:
+                    explanation = (
+                        "Only three images can be analysed in one request."
+                        if vision_allowed else
+                        "Local vision is disabled or not enabled in Settings. "
+                        "The current Colibri text model cannot see pixels.")
+                    if not messagebox.askokcancel(
+                        "Images are not analysed",
+                        explanation + "\n\nContinue WITHOUT image understanding?",
+                        parent=self.root):
+                        for item in staged:
+                            item.path.unlink(missing_ok=True)
+                        return
         attachment_names = (", ".join(f.name for f in staged) if staged else "")
         stored_prompt = (prompt + ("\n[Attached: " + attachment_names + "]"
                                    if attachment_names else ""))
@@ -1910,6 +1958,33 @@ class MiloDesktop:
             try:
                 research_context = ""
                 answer_suffix = ""
+                actual_context = local_context
+                if vision_job is not None:
+                    self.events.put(("research_status",
+                                     "Running approved LOCAL image analysis…"))
+                    backend, image_items = vision_job
+                    try:
+                        findings = backend.analyse(
+                            [item.path for item in image_items],
+                            clean_prompt, approved=True)
+                        if self.cancel.is_set():
+                            self.events.put(("cancelled", chat_id))
+                            return
+                        # Use original owner-visible filenames, never the
+                        # random private attachment storage paths.
+                        findings = [
+                            type(finding)(item.name, finding.model,
+                                          finding.observation)
+                            for item, finding in zip(image_items, findings)
+                        ]
+                        actual_context += "\n\n" + vision_context(findings)
+                        self.events.put(("research_status",
+                            "Local vision completed · composing Milo's answer…"))
+                    except (VisionError, OSError, ValueError) as exc:
+                        raise VisionError(
+                            "Image analysis failed; no visual result was "
+                            "supplied to the chat model. " + str(exc)[:180]
+                        ) from exc
                 if research_query:
                     self.events.put(("research_status", "Searching the public web…"))
                     sources = search_public_web(research_query)
@@ -1929,7 +2004,7 @@ class MiloDesktop:
                         shared_room=(settings.kind == "room"),
                         research_context=research_context,
                         answer_suffix=answer_suffix,
-                        local_attachment_context=local_context)
+                        local_attachment_context=actual_context)
                     chunks = conversation.stream_reply(
                         clean_prompt, chat_id=chat_id,
                         stored_user_text=stored_prompt)
@@ -2969,7 +3044,9 @@ class MiloDesktop:
             messagebox.showerror("Milo import failed", str(exc)[:350])
 
     def settings_window(self):
-        panel = self._panel("Settings", "Manage your local model and identity.")
+        panel = self._panel("Settings", "Manage models, identity and optional tools.")
+        panel.geometry("620x780")
+        panel.minsize(560, 650)
         values = {}
         fields = [
             ("Name", "user_name"),
@@ -2991,6 +3068,38 @@ class MiloDesktop:
             tk.Label(panel, text="Detected models: " + ", ".join(self.models[:4]),
                      bg=PANEL, fg=MUTED, wraplength=475).pack(
                          padx=24, pady=7, anchor="w")
+        tk.Label(
+            panel, text="Optional LOCAL vision — disabled by default",
+            bg=PANEL, fg=VIOLET, font=(FONT, 10, "bold")).pack(
+                anchor="w", padx=24, pady=(10, 4))
+        vision_enabled = tk.BooleanVar(
+            value=self.config.get("vision_enabled", "off") == "on")
+        tk.Checkbutton(
+            panel, text="Allow image analysis (ask approval each time)",
+            variable=vision_enabled, bg=PANEL, fg=FG, selectcolor=BG,
+            activebackground=PANEL, activeforeground=FG,
+            font=(FONT, 9)).pack(anchor="w", padx=24)
+        for title, key in (
+            ("Installed Ollama vision model", "vision_model"),
+            ("Local Ollama URL", "vision_endpoint"),
+        ):
+            tk.Label(panel, text=title, bg=PANEL, fg=MUTED,
+                     font=(FONT, 9)).pack(anchor="w", padx=24, pady=(5, 2))
+            var = tk.StringVar(value=self.config.get(key, ""))
+            values[key] = var
+            tk.Entry(panel, textvariable=var, bg=BG, fg=FG,
+                     insertbackground=FG, relief="flat",
+                     font=(FONT, 9), highlightthickness=1,
+                     highlightbackground=EDGE, highlightcolor=VIOLET).pack(
+                         fill="x", padx=24, ipady=5)
+        tk.Label(
+            panel,
+            text="Uses a separate local vision model. Never downloads models "
+                 "or sends images to a cloud service. A 2B vision model "
+                 "is recommended for lower-memory computers.",
+            bg=PANEL, fg=MUTED, font=(FONT, 8),
+            wraplength=535, justify="left").pack(
+                anchor="w", padx=24, pady=(4, 7))
         shortcut_enabled = tk.BooleanVar(
             value=self.config.get("global_shortcut", "on") == "on")
         tk.Checkbutton(
@@ -3014,6 +3123,17 @@ class MiloDesktop:
             except (ValueError, TypeError) as exc:
                 messagebox.showerror("Invalid local endpoint", str(exc), parent=panel)
                 return
+            next_config["vision_enabled"] = (
+                "on" if vision_enabled.get() else "off")
+            if next_config["vision_enabled"] == "on":
+                try:
+                    OllamaLocalVision(
+                        model=next_config["vision_model"],
+                        endpoint=next_config["vision_endpoint"])
+                except ValueError as exc:
+                    messagebox.showerror("Invalid local vision settings",
+                                         str(exc), parent=panel)
+                    return
             if not next_config["user_name"] or not next_config["milo_name"]:
                 messagebox.showerror("Invalid names", "Enter both display names.",
                                      parent=panel)
