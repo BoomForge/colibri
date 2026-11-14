@@ -2150,11 +2150,19 @@ class MiloDesktop:
                 elif kind == "update_check":
                     self.release_candidate = event[1]
                     version = release_version(event[1]) if event[1] else ""
+                    if event[1] and newer(version):
+                        update_text = "Update available: " + version
+                    elif event[1] and newer(VERSION, version):
+                        update_text = (
+                            "This Milo " + VERSION + " build is a preview. "
+                            "Latest published release: " + version +
+                            ". Preview builds are distributed separately.")
+                    elif event[1]:
+                        update_text = "You're on the latest published Milo version."
+                    else:
+                        update_text = "No public Milo release published yet."
                     self.update_label.configure(
-                        text=("Update available: " + version
-                              if event[1] and newer(version)
-                              else "You're running the latest published Milo version."
-                              if event[1] else "No public Milo release published yet."),
+                        text=update_text,
                         fg=ORANGE if event[1] and newer(version) else MUTED)
                     self.update_button.configure(
                         state="normal" if event[1] and newer(version)
