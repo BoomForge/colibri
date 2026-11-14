@@ -8,6 +8,7 @@ import unittest
 from colibri.milo_core.local_engine import (
     EngineStartupError, LocalEngine, chosen_model,
     discover_models, managed_models_root, model_valid,
+    discover_loose_gguf, gguf_target,
 )
 
 
@@ -48,6 +49,24 @@ class ModelFoldersTest(unittest.TestCase):
             root = managed_models_root(Path(tmp))
             fake_model(Path(tmp), "external")
             self.assertIsNone(chosen_model(root, "../external"))
+
+    def test_detects_loose_gguf_and_first_party_link_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = managed_models_root(Path(tmp))
+            gguf = root / "Qwen3-4B.gguf"
+            gguf.write_bytes(b"GGUF" + b"\0" * 100)
+            self.assertEqual(discover_loose_gguf(root), [gguf])
+            sidecar = gguf_target(root, gguf)
+            self.assertEqual(sidecar.name, "Qwen3-4B.colibri")
+            sidecar.mkdir()
+            (sidecar / "config.json").write_text("{}", encoding="utf-8")
+            (sidecar / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (sidecar / "gguf.json").write_text(
+                '{"format":"colibri-gguf-v1","mode":"link",'
+                '"gguf":' + __import__("json").dumps(str(gguf)) + '}',
+                encoding="utf-8")
+            self.assertTrue(model_valid(sidecar))
+            self.assertEqual(discover_models(root), [sidecar])
 
     def test_missing_engine_is_not_started(self):
         with tempfile.TemporaryDirectory() as tmp:
