@@ -58,6 +58,8 @@ DB_PATH = DATA_DIR / "memory.sqlite3"
 CONFIG_PATH = DATA_DIR / "settings" / "preferences.json"
 AVATARS = DATA_DIR / "avatars"
 ORIGINAL_ARCHIVES = DATA_DIR / "original_archives"
+BRAND_AVATAR = install_root() / "Assets" / "milo_profile.png"
+BRAND_ICON = install_root() / "Assets" / "Milo.ico"
 DEFAULTS = {
     "model": "",
     "base_url": "http://127.0.0.1:8000/v1",
@@ -141,7 +143,14 @@ def list_models(base_url: str) -> list[str]:
 class MiloDesktop:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("MILO  •  Personal Assistant")
+        self.root.title("Milo — Personal Assistant")
+        try:
+            if BRAND_ICON.is_file() and sys.platform == "win32":
+                self.root.iconbitmap(str(BRAND_ICON))
+            elif BRAND_AVATAR.is_file():
+                self.root.iconphoto(True, tk.PhotoImage(file=str(BRAND_AVATAR)))
+        except tk.TclError:
+            pass
         self.root.geometry("1180x780")
         self.root.minsize(860, 580)
         self.root.configure(bg=BG)
@@ -199,18 +208,28 @@ class MiloDesktop:
         self.chat_list.pack(fill="both", expand=True, padx=12)
         self.chat_list.bind("<<ListboxSelect>>", self._select_chat)
 
-        tools = tk.Frame(self.side, bg=SIDEBAR)
-        tools.pack(fill="x", padx=12, pady=12)
+        # Chat and conversations stay visible; the setup/admin tools don't
+        # compete for attention. Their original functionality remains intact.
+        self.advanced_open = False
+        self.advanced_wrap = tk.Frame(self.side, bg=SIDEBAR)
+        self.advanced_wrap.pack(fill="x", padx=12, pady=(7, 11))
+        self.advanced_toggle = new_button(
+            self.advanced_wrap, "⚙  Setup & modules  ▸",
+            self.toggle_advanced)
+        self.advanced_toggle.pack(fill="x")
+        self.advanced_controls = tk.Frame(self.advanced_wrap, bg=SIDEBAR)
         for caption, action in [
             ("Models", self.models_window),
-            ("Restore Milo personality", self.restore_milo_personality),
+            ("Updates & modules", self.updates_modules_window),
             ("Memory", self.memory_window),
+            ("Restore Milo personality", self.restore_milo_personality),
             ("Find files", self.find_files_window),
             ("Ask SOL", self.sol_window),
             ("Back up / Restore", self.backup_window),
             ("Settings", self.settings_window),
         ]:
-            new_button(tools, caption, action).pack(fill="x", pady=3)
+            new_button(self.advanced_controls, caption, action).pack(
+                fill="x", pady=2)
 
         self.profile_row = tk.Frame(self.side, bg=PANEL)
         self.profile_row.pack(fill="x", side="bottom", padx=12, pady=(6, 13))
@@ -281,6 +300,16 @@ class MiloDesktop:
         tk.Label(main, text="Local-first  •  Enter to send  •  Shift+Enter for a new line",
                  bg=BG, fg=MUTED, font=(FONT, 9)).pack(anchor="w", padx=24,
                                                           pady=(0, 8))
+
+    def toggle_advanced(self):
+        self.advanced_open = not self.advanced_open
+        self.advanced_toggle.configure(
+            text=("⚙  Setup & modules  ▾" if self.advanced_open
+                  else "⚙  Setup & modules  ▸"))
+        if self.advanced_open:
+            self.advanced_controls.pack(fill="x", pady=(5, 0))
+        else:
+            self.advanced_controls.pack_forget()
 
     def _enter_key(self, event):
         if event.state & 0x1:  # Shift+Enter
@@ -587,10 +616,11 @@ class MiloDesktop:
     def _avatar(self, widget: tk.Label, setting: str, fallback: str):
         widget.configure(image="", text=fallback[:1].upper(), width=3, height=1)
         path = self.config.get(setting)
-        if not path:
-            return
-        full = AVATARS / path
-        if not full.exists():
+        # Use the owner's official Milo illustration by default, but preserve
+        # custom avatars already set in earlier Milo versions.
+        full = (AVATARS / path if path else
+                BRAND_AVATAR if setting == "avatar_milo" else None)
+        if full is None or not full.exists():
             return
         try:
             picture = tk.PhotoImage(file=full)
