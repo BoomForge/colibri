@@ -6853,6 +6853,10 @@ class Engine:
         # not reach the engine — the C runtime's default would kill it
         # before its stdin-EOF teardown (atexit -> HEAT_FILE save) can run.
         spawn_flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+        # Milo embeds Colibri in a windowed desktop app. Its C engine should not
+        # flash a console on Windows. Opt-in only; normal Colibri CLI unchanged.
+        if sys.platform == "win32" and os.environ.get("MILO_HIDE_ENGINE_CONSOLE") == "1":
+            spawn_flags |= subprocess.CREATE_NO_WINDOW
         self.process = subprocess.Popen(
             [str(executable), str(resolved_cap)], env=child_env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0,
