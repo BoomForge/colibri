@@ -170,7 +170,7 @@ def set_chat_settings(db: sqlite3.Connection, settings: ChatSettings):
         )
 
 
-_MENTION = re.compile(r"^\s*@([a-z][a-z0-9_-]{1,30})(?=\s|[:,!?]|$)", re.I)
+_MENTION = re.compile(r"(?<![\w@])@([a-z][a-z0-9_-]{1,30})(?=\s|[:,!?;.\n]|$)", re.I)
 
 
 def resolve_target(db: sqlite3.Connection, prompt: str,
@@ -182,17 +182,18 @@ def resolve_target(db: sqlite3.Connection, prompt: str,
             if bot is None or not bot.active:
                 raise ValueError("This bot was disabled; reopen or edit it to resume.")
         return settings.bot_id, prompt
-    match = _MENTION.match(prompt)
+    match = _MENTION.search(prompt)
     if not match:
         return "milo", prompt
     handle = match.group(1).lower()
     if handle == "milo":
-        return "milo", prompt[match.end():].lstrip(" \t,:")
+        stripped = (prompt[:match.start()] + prompt[match.end():]).strip(" \\t,:")
+        return "milo", stripped or prompt
     bot = get_bot(db, handle)
     if bot is None or not bot.active:
         raise ValueError(
             f"@{handle} does not match an enabled bot. Add or enable it in the right panel.")
-    remainder = prompt[match.end():].lstrip(" \t,:")
+    remainder = (prompt[:match.start()] + prompt[match.end():]).strip(" \t,:")
     if not remainder.strip():
         raise ValueError("Add a message after the @bot handle")
     return handle, remainder
