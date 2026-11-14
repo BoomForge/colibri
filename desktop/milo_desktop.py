@@ -42,6 +42,7 @@ from colibri.milo_core.tool_activity import (
     init_activity, record_activity, list_activity, clear_activity,
 )
 from desktop.screen_capture import capture_primary_screen, ScreenCaptureError
+from desktop.tray_service import MiloTray
 from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
 from colibri.milo_core.filesystem import find_files_by_prefix
@@ -247,6 +248,9 @@ class MiloDesktop:
         self.loading_model_location = ""
         self.pending_send = None
         self.events: queue.Queue[tuple] = queue.Queue()
+        self.tray = MiloTray(self.events, BRAND_ICON, BRAND_AVATAR)
+        self._tray_hidden_panels = []
+        self._exiting = False
         self.quick_hotkey = GlobalQuickChatHotkey(self.events)
         self.session_captures: list[Path] = []
         self.active_tool: str | None = None
@@ -280,7 +284,12 @@ class MiloDesktop:
         self._refresh_chat_context()
         self._ensure_chat_model()
         self.root.after(70, self._pump)
-        self.root.protocol("WM_DELETE_WINDOW", self._close)
+        # Close (X / Alt+F4) and the minimise button leave Milo running.
+        # The only normal quit action is "Close Milo" in the tray menu.
+        self.root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+        self.root.bind("<Unmap>", self._on_main_unmap, add="+")
+        if "--ui-self-test" not in sys.argv:
+            self.tray.start()
         if ("--ui-self-test" not in sys.argv
                 and self.config.get("global_shortcut") == "on"):
             self.quick_hotkey.start()
@@ -2131,7 +2140,21 @@ class MiloDesktop:
             while True:
                 event = self.events.get_nowait()
                 kind = event[0]
-                if kind == "quick_chat":
+                if kind == "tray_open":
+                    self._restore_from_tray()
+                elif kind == "tray_exit":
+                    self._close()
+                    return
+                elif kind == "tray_unavailable":
+                    # A crashed notification-area host must not strand a
+                    # hidden application with no way to reopen it.
+                    self._restore_from_tray()
+                    messagebox.showwarning(
+                        "Milo tray unavailable",
+                        "Milo could not keep its Windows tray icon active. "
+                        "The main window has been restored.",
+                        parent=self.root)
+                elif kind == "quick_chat":
                     self.show_quick_chat()
                 elif kind == "hotkey_unavailable":
                     # The OS shortcut is already reserved by another app.
@@ -3668,7 +3691,69 @@ class MiloDesktop:
                  justify="left").pack(anchor="w", padx=24, pady=(0, 8))
         return window
 
+    def _on_main_unmap(self, event):
+        """Windows minimise button behaves like Close: hide to the tray."""
+        if event.widget is not self.root or self._exiting:
+            return
+        try:
+            if self.root.state() == "iconic":
+                self.root.after_idle(self._hide_to_tray)
+        except tk.TclError:
+            pass
+
+    def _hide_to_tray(self):
+        """Retain the process and local Colibri model when X/minimise is used."""
+        if self._exiting:
+            return
+        if not self.tray.ready:
+            # Never withdraw a window without a working restoration icon.
+            try:
+                self.root.deiconify()
+            except tk.TclError:
+                return
+            messagebox.showwarning(
+                "Milo tray unavailable",
+                "Milo will stay open because its Windows tray icon is not "
+                "ready. Check that your notification area is available.",
+                parent=self.root)
+            return
+        self._tray_hidden_panels = []
+        for widget in self.root.winfo_children():
+            if not isinstance(widget, tk.Toplevel):
+                continue
+            try:
+                if widget.winfo_viewable():
+                    self._tray_hidden_panels.append(widget)
+                    widget.withdraw()
+            except tk.TclError:
+                continue
+        self.root.withdraw()
+
+    def _restore_from_tray(self):
+        """Bring back Milo from a tray double-click or Open Milo action."""
+        if self._exiting:
+            return
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            for widget in self._tray_hidden_panels:
+                try:
+                    if widget.winfo_exists():
+                        widget.deiconify()
+                except tk.TclError:
+                    continue
+            self._tray_hidden_panels = []
+            self.root.lift()
+            self.root.focus_set()
+        except tk.TclError:
+            pass
+
     def _close(self):
+        """Explicit shutdown from tray or approved installer handoff."""
+        if self._exiting:
+            return
+        self._exiting = True
+        self.tray.stop()
         self.quick_hotkey.stop()
         for path in self.session_captures:
             try:
