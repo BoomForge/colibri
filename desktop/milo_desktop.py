@@ -784,16 +784,16 @@ class MiloDesktop:
         if text.strip():
             self.chat_view.notice(text.strip())
 
-    def _display_turn(self, role: str, text: str, timestamp: str = ""):
-        return self.chat_view.add_message(role, text, timestamp)
+    def _display_turn(self, role: str, text: str, timestamp: str = "",
+                      *, author_id=None, author_name=None, avatar=None):
+        return self.chat_view.add_message(
+            role, text, timestamp, author_id=author_id,
+            author_name=author_name, avatar=avatar)
 
     def _load_chat(self):
         self.chat_view.clear()
         self.pending_message = None
-        rows = self.db.db.execute(
-            "SELECT role, content, created_at FROM conversations WHERE chat_id=? "
-            "ORDER BY id LIMIT 1000", (self.current_chat,)
-        ).fetchall()
+        rows = attributed_messages(self.db.db, self.current_chat, limit=1000)
         if not rows:
             archive_notice = (
                 "The original Milo conversation archive is available for "
@@ -806,21 +806,35 @@ class MiloDesktop:
                 "This conversation is stored only on your computer.\n"
                 + archive_notice + "Start a message below.", "notice"
             )
-        for role, text, date in rows:
-            self._display_turn(role, text, date)
+        for role, text, date, author_id, author_name, avatar in rows:
+            self._display_turn(
+                role, text, date,
+                author_id=author_id if role == "assistant" else None,
+                author_name=author_name if role == "assistant" else None,
+                avatar=(AVATARS / avatar if avatar else None))
 
     def _refresh_chat_list(self):
         self.chats = []
         rows = self.db.db.execute(
             "SELECT c.chat_id, COALESCE((SELECT substr(u.content, 1, 32) "
             "FROM conversations u WHERE u.chat_id=c.chat_id AND u.role='user' "
-            "ORDER BY u.id LIMIT 1), 'Conversation') "
-            "FROM conversations c GROUP BY c.chat_id ORDER BY MAX(c.id) DESC "
-            "LIMIT 100"
+            "ORDER BY u.id LIMIT 1), 'Conversation'), "
+            "COALESCE(s.kind, 'room'), COALESCE(s.bot_id,'milo') "
+            "FROM conversations c LEFT JOIN chat_settings s ON c.chat_id=s.chat_id "
+            "GROUP BY c.chat_id ORDER BY MAX(c.id) DESC LIMIT 100"
         ).fetchall()
-        self.chats.extend((chat_id, title) for chat_id, title in rows)
+        for chat_id, title, kind, bot_id in rows:
+            if kind == "private":
+                bot = get_bot(self.db.db, bot_id) if bot_id != "milo" else None
+                title = "@" + bot_id + " · " + title
+            else:
+                title = "# " + title
+            self.chats.append((chat_id, title))
         if self.current_chat not in {x[0] for x in self.chats}:
-            self.chats.insert(0, (self.current_chat, "New conversation"))
+            context = chat_settings(self.db.db, self.current_chat)
+            title = ("DM @" + context.bot_id if context.kind == "private"
+                     else "# New conversation")
+            self.chats.insert(0, (self.current_chat, title))
         self.chat_list.set_chats(self.chats, self.current_chat)
 
     def _select_chat(self, selected):
@@ -832,6 +846,8 @@ class MiloDesktop:
             save_config(self.config)
             self._refresh_chat_list()
             self._load_chat()
+            self._refresh_chat_context()
+            self._ensure_chat_model()
 
     def copy_conversation(self):
         """Copy the complete locally stored transcript without contacting a model."""
@@ -860,14 +876,60 @@ class MiloDesktop:
             messagebox.showerror("Copy chat", str(exc)[:220])
 
     def new_chat(self):
-        if self.busy:
-            messagebox.showinfo("Milo", "Finish or stop the current response first.")
+        if self.busy or self.engine_starting:
+            messagebox.showinfo(
+                "Milo", "Finish the current response/model load before creating a chat.")
             return
-        self.current_chat = uuid.uuid4().hex
-        self.config["current_chat"] = self.current_chat
-        save_config(self.config)
-        self._refresh_chat_list()
-        self._load_chat()
+        panel = self._panel(
+            "New conversation",
+            "Choose a shared Milo room or a private DM with one of your bots. "
+            "Select the model for this conversation.")
+        panel.geometry("565x365")
+        bots = list_bots(self.db.db)
+        room = "Milo · shared chat"
+        type_options = [room] + [
+            f"Private · @{bot.id} ({bot.name})" for bot in bots]
+        tk.Label(panel, text="Conversation", bg=PANEL, fg=MUTED,
+                 font=(FONT, 10)).pack(anchor="w", padx=24, pady=(14, 6))
+        type_var = tk.StringVar(value=room)
+        chooser = ttk.Combobox(
+            panel, textvariable=type_var, values=type_options,
+            state="readonly", font=(FONT, 10))
+        chooser.pack(fill="x", padx=24, ipady=5)
+        tk.Label(panel, text="Local model for this chat", bg=PANEL, fg=MUTED,
+                 font=(FONT, 10)).pack(anchor="w", padx=24, pady=(17, 6))
+        paths = self._installed_model_choices()
+        labels = ["Auto · use bot / Milo default"] + paths
+        model_var = tk.StringVar(value=paths[0] if paths else labels[0])
+        model_chooser = ttk.Combobox(
+            panel, textvariable=model_var,
+            values=labels, state="readonly" if paths else "disabled",
+            font=(FONT, 10))
+        model_chooser.pack(fill="x", padx=24, ipady=5)
+        tk.Label(
+            panel,
+            text="One local Colibri model runs at a time. Switching chats to "
+                 "different checkpoints may require a brief reload; no models are removed.",
+            bg=PANEL, fg=MUTED, justify="left", wraplength=510,
+            font=(FONT, 9)).pack(anchor="w", padx=24, pady=(13, 4))
+        def create():
+            choice = type_var.get()
+            if choice == room:
+                kind, bot_id = "room", "milo"
+            else:
+                index = type_options.index(choice) - 1
+                if not 0 <= index < len(bots):
+                    return
+                kind, bot_id = "private", bots[index].id
+            chosen = "" if model_var.get() == labels[0] else model_var.get()
+            if chosen and chosen not in self._installed_model_choices():
+                messagebox.showerror("Model", "Selected model is no longer installed.", parent=panel)
+                return
+            panel.destroy()
+            self._start_chat(kind, bot_id, chosen)
+        new_button(panel, "Create conversation", create, primary=True).pack(
+            fill="x", padx=24, pady=(18, 12))
+
 
     def send(self):
         if self.busy:
