@@ -6,6 +6,7 @@ Milo's memory, profiles and settings remain separate from the model weights.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,10 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
 from colibri.milo_core.filesystem import find_files_by_prefix
+from colibri.milo_core.legacy_archive import (
+    LegacyArchiveError, import_legacy_archive, inspect_legacy_archive,
+    loaded_persona,
+)
 from colibri.milo_core.portable_backup import BackupError, export_bundle, import_bundle
 from colibri.milo_core.provider import LocalOpenAIProvider, ProviderError
 from colibri.milo_core.store import LocalMemoryStore
@@ -46,6 +51,7 @@ DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "shar
 DB_PATH = DATA_DIR / "memory.sqlite3"
 CONFIG_PATH = DATA_DIR / "settings" / "preferences.json"
 AVATARS = DATA_DIR / "avatars"
+ORIGINAL_ARCHIVES = DATA_DIR / "original_archives"
 DEFAULTS = {
     "model": "",
     "base_url": "http://127.0.0.1:8000/v1",
@@ -179,6 +185,7 @@ class MiloDesktop:
         tools = tk.Frame(self.side, bg=SIDEBAR)
         tools.pack(fill="x", padx=12, pady=12)
         for caption, action in [
+            ("Restore Milo personality", self.restore_milo_personality),
             ("Memory", self.memory_window),
             ("Find files", self.find_files_window),
             ("Ask SOL", self.sol_window),
@@ -215,6 +222,10 @@ class MiloDesktop:
         self.connection_label = tk.Label(label_stack, text="Checking local model...",
                                          bg=PANEL, fg=MUTED, font=(FONT, 9))
         self.connection_label.pack(anchor="w")
+        self.persona_status_label = tk.Label(
+            label_stack, text="Personality not imported",
+            bg=PANEL, fg=MUTED, font=(FONT, 8))
+        self.persona_status_label.pack(anchor="w")
         new_button(heading, "Reconnect", self.check_connection).pack(
             side="right", padx=16, pady=18)
 
@@ -287,9 +298,17 @@ class MiloDesktop:
             "ORDER BY id LIMIT 1000", (self.current_chat,)
         ).fetchall()
         if not rows:
-            self._append("This conversation is stored only on your computer.\n"
-                         "Start a message below. Your original Milo archives have "
-                         "not been imported.", "notice")
+            archive_notice = (
+                "The original Milo conversation archive is available for "
+                "evidence-backed recall.\n"
+                if loaded_persona(self.db.db) is not None else
+                "Your original Milo personality has not been imported yet. "
+                "Choose Restore Milo personality in the sidebar.\n"
+            )
+            self._append(
+                "This conversation is stored only on your computer.\n"
+                + archive_notice + "Start a message below.", "notice"
+            )
         for role, text, date in rows:
             self._display_turn(role, text, date)
 
@@ -477,8 +496,105 @@ class MiloDesktop:
     def _refresh_profile(self):
         self.user_label.configure(text=self.config["user_name"])
         self.milo_title.configure(text=self.config["milo_name"])
+        has_persona = loaded_persona(self.db.db) is not None
+        self.persona_status_label.configure(
+            text=("● Historical personality imported"
+                  if has_persona else "○ Temporary personality"),
+            fg="#9fdfb4" if has_persona else ORANGE,
+        )
         self._avatar(self.user_icon, "avatar_user", self.config["user_name"])
         self._avatar(self.milo_icon, "avatar_milo", self.config["milo_name"])
+
+    def restore_milo_personality(self):
+        """Private, approved local import; no GitHub upload or model training."""
+        if self.busy:
+            messagebox.showinfo(
+                "Milo", "Finish the current response before importing historical memory."
+            )
+            return
+        source = filedialog.askopenfilename(
+            title="Select Milo original private history / continuity ZIP",
+            filetypes=[
+                ("Milo private archive", "*.zip *.json"),
+                ("JSON chat archive", "*.json"),
+                ("Continuity package", "*.zip"),
+            ],
+        )
+        if not source:
+            return
+        try:
+            preview = inspect_legacy_archive(source)
+        except (LegacyArchiveError, OSError, ValueError) as exc:
+            messagebox.showerror("Milo archive", str(exc))
+            return
+        old_profile = loaded_persona(self.db.db)
+        replacement = old_profile is not None and preview.has_persona
+        explanation = (
+            f"Original chat messages: {preview.messages}\n"
+            f"Earlier Milo: {preview.milo_messages}\n"
+            f"Your messages: {preview.user_messages}\n"
+            f"Covered period: {preview.first_date} to {preview.last_date} (UTC)\n"
+            f"Image references: {preview.image_references}\n"
+            f"Other attachment references: {preview.attachment_references}\n"
+            f"Personality profile included: {'yes' if preview.has_persona else 'no'}\n\n"
+            "This imports historical messages into a SEPARATE, source-labelled "
+            "local archive. It does not insert them into your current chats. "
+            "Referenced images are not downloaded.\n"
+            "The selected private source file is retained locally for backup.\n\n"
+        )
+        if replacement:
+            explanation += (
+                "Your current imported Milo personality will be replaced by "
+                "this newly selected historical profile.\n\n"
+            )
+        explanation += "Nothing is sent to GitHub or other computers. Import now?"
+        if not messagebox.askyesno("Import original Milo history", explanation):
+            return
+        try:
+            ORIGINAL_ARCHIVES.mkdir(parents=True, exist_ok=True)
+            source_path = Path(source)
+            archive_path = ORIGINAL_ARCHIVES / (
+                "milo-original-" + preview.source_sha256[:20]
+                + source_path.suffix.lower()
+            )
+            if not archive_path.exists():
+                scratch = archive_path.with_suffix(archive_path.suffix + ".part")
+                if scratch.exists():
+                    raise LegacyArchiveError(
+                        "a partial previous archive file exists; inspect it first"
+                    )
+                try:
+                    shutil.copyfile(source_path, scratch)
+                    def fingerprint(path):
+                        h = hashlib.sha256()
+                        with path.open("rb") as handle:
+                            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                                h.update(block)
+                        return h.digest()
+                    if fingerprint(scratch) != fingerprint(source_path):
+                        raise LegacyArchiveError("archive copy verification failed")
+                    scratch.replace(archive_path)
+                except Exception:
+                    scratch.unlink(missing_ok=True)
+                    raise
+            # Consistent migration and persona installation within SQLite.
+            import_legacy_archive(
+                self.db.db, archive_path, user_approved=True,
+                replace_profile=replacement,
+            )
+            self._refresh_profile()
+            self._load_chat()
+            messagebox.showinfo(
+                "Milo history imported",
+                f"Original history indexed: {preview.messages} messages.\n"
+                f"Personality installed: {'yes' if preview.has_persona else 'no'}.\n\n"
+                "You can now start a new chat. Milo will use the local profile "
+                "and retrieve dated archive excerpts where relevant.\n\n"
+                "This reconstructs her documented manner and memories; "
+                "it cannot reproduce the original model exactly.",
+            )
+        except (OSError, LegacyArchiveError, sqlite3.Error, ValueError) as exc:
+            messagebox.showerror("Milo import failed", str(exc)[:350])
 
     def settings_window(self):
         panel = self._panel("Settings", "Manage your local model and identity.")
@@ -692,7 +808,8 @@ class MiloDesktop:
         panel = self._panel("Portable backup (preview)",
              "Encrypted data migration; full one-click PC restore is still in development.")
         tk.Label(panel,
-                 text="Included: SQLite chat and memory, preferences and avatars.\n"
+                 text="Included: SQLite chats, recovered persona and archived messages,\n"
+                      "preferences and avatars; any locally retained source archives.\n"
                       "Optional model weights: only when their folder is configured.\n"
                       "Not yet included: automatic runtime discovery, external credentials,\n"
                       "or complete restored-app activation. This is NOT a full PC clone.",
@@ -717,11 +834,13 @@ class MiloDesktop:
                 return
             model_dir = self.config.get("model_directory", "")
             roots = {"settings": CONFIG_PATH.parent, "avatars": AVATARS}
+            if ORIGINAL_ARCHIVES.is_dir():
+                roots["archives"] = ORIGINAL_ARCHIVES
             if model_dir:
                 roots["models"] = Path(model_dir)
             if not messagebox.askyesno(
                 "Confirm backup coverage",
-                ("Create encrypted backup of memory, settings, avatars"
+                ("Create encrypted backup of memory, settings, avatars and private archives"
                  + (", and selected model folder" if model_dir else
                     " WITHOUT model weights")
                  + "?\n\nThis preview is not yet an exhaustive PC migration."),
