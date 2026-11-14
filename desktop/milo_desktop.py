@@ -272,6 +272,14 @@ class MiloDesktop:
             self.side, self._select_chat, on_delete=self.delete_chat,
             background=SIDEBAR)
         self.chat_list.pack(fill="both", expand=True, padx=(5, 5))
+        self.root.bind("<Control-k>", lambda _e: self.search_conversations())
+
+        search_chats = new_button(
+            self.side, "⌕   Search conversations (Ctrl+K)",
+            self.search_conversations)
+        search_chats.configure(bg=SIDEBAR, fg=MUTED, anchor="w",
+                               font=(FONT, 9), pady=7, padx=9)
+        search_chats.pack(fill="x", padx=10, pady=(0, 4))
 
         # Chat and conversations stay visible; the setup/admin tools don't
         # compete for attention. Their original functionality remains intact.
@@ -1044,6 +1052,62 @@ class MiloDesktop:
             self._load_chat()
             self._refresh_chat_context()
             self._ensure_chat_model()
+
+    def search_conversations(self):
+        """Privacy-preserving local history search, no model or web request."""
+        if self.busy:
+            messagebox.showinfo(
+                "Chat search", "Finish the current response before opening a chat.")
+            return
+        panel = self._panel(
+            "Find a conversation",
+            "Search your local conversation history. Nothing is uploaded.")
+        panel.geometry("760x520")
+        term = tk.StringVar()
+        field = tk.Entry(
+            panel, textvariable=term, bg=BG, fg=FG,
+            insertbackground=VIOLET, relief="flat", font=(FONT, 11))
+        field.pack(fill="x", padx=22, pady=(15, 9), ipady=8)
+        found = tk.Listbox(
+            panel, bg=BG, fg=FG, selectbackground=EDGE,
+            font=(FONT, 10), relief="flat", activestyle="none",
+            exportselection=False)
+        found.pack(fill="both", expand=True, padx=22, pady=(0, 10))
+        ids = []
+        def search(*_args):
+            pattern = term.get().strip()
+            found.delete(0, "end")
+            ids.clear()
+            if len(pattern) < 2:
+                return
+            escaped = (pattern[:120].replace("\\", "\\\\")
+                       .replace("%", "\\%").replace("_", "\\_"))
+            rows = self.db.db.execute(
+                "SELECT chat_id, substr(content,1,110) FROM conversations "
+                "WHERE content LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 80",
+                ("%" + escaped + "%",)).fetchall()
+            seen = set()
+            for chat_id, excerpt in rows:
+                if chat_id in seen:
+                    continue
+                seen.add(chat_id)
+                ids.append(chat_id)
+                single_line = " ".join(excerpt.split())
+                found.insert("end", single_line[:90])
+        def open_result(_event=None):
+            index = found.curselection()
+            if not index or index[0] >= len(ids):
+                return
+            chat_id = ids[index[0]]
+            panel.destroy()
+            self._select_chat(chat_id)
+        term.trace_add("write", search)
+        found.bind("<Double-Button-1>", open_result)
+        found.bind("<Return>", open_result)
+        new_button(panel, "Open selected conversation", open_result,
+                   primary=True).pack(fill="x", padx=22, pady=(0, 17))
+        field.focus_set()
+        return panel
 
     def delete_chat(self, chat_id):
         """Explicit destructive action only; don't touch historical archives."""
