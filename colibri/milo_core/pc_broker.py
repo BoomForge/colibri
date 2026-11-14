@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 import webbrowser
 
 from .chat_files import known_folder
+from .app_discovery import AppMatch, normalise_name, _validate_exe
 from .file_operations import (
     MovePlan, plan_file_moves, execute_file_moves, FileMoveError,
 )
@@ -171,6 +172,27 @@ def parse_pc_request(message: str, *, registered: dict[str, str] | None = None) 
             exe = _trusted_builtin(name) if origin == "builtin" else registered[name]
             return PCPlan("launch_app", "Launch "+name.title(),
                           "Launch the approved "+origin+" application:\n"+str(exe), (name, origin, str(exe)))
+        # Unknown installed application names are *looked up locally*.
+        # No executable path is invented, and nothing launches at this stage.
+        query = re.sub(
+            r"\s+(?:app|application|program)\s*$", "",
+            m.group(1), flags=re.I).strip()
+        query = re.sub(r"^(?:the|my)\s+", "", query, flags=re.I)
+        if (Path(query).suffix.casefold() not in ASSET_TYPES
+                and Path(query).suffix.casefold() not in (
+                    ".lnk", ".url", ".bat", ".cmd", ".ps1", ".vbs", ".js",
+                    ".msi", ".scr", ".dll", ".pyd", ".py")
+                and not query.casefold().endswith(" settings")):
+            try:
+                app_name = normalise_name(query)
+            except ValueError:
+                pass
+            else:
+                return PCPlan(
+                    "discover_app", "Find "+app_name.title(),
+                    "Search only installed application entries and standard "
+                    "Windows application folders for "+app_name+". "
+                    "Searching does not execute anything.", (app_name,))
 
     m = re.fullmatch(r"(?:list|show|summari[sz]e)\s+(?:the\s+)?(?:files|contents|items)?\s*(?:in|of|from)?\s*(?:my|the)?\s*(desktop|downloads|documents|pictures)(?:\s+folder)?", text, re.I)
     if m:
@@ -374,6 +396,24 @@ def _type_unicode(value: str) -> None:
         raise PCActionError("Windows did not accept all keystrokes; check the target manually")
 
 
+def plan_discovered_launch(query: str, match: AppMatch) -> PCPlan:
+    """Create a frozen candidate; owner still approves this exact executable."""
+    name = normalise_name(query)
+    if not isinstance(match, AppMatch) or match.score < 62:
+        raise PCActionError("Not a verified installed application match")
+    path = _validate_exe(match.path)
+    if path is None or path != match.path:
+        raise PCActionError("The discovered executable is no longer available")
+    info = path.stat()
+    return PCPlan(
+        "launch_discovered_app", "Launch "+name.title(),
+        "Milo found this installed program:\n\n"+str(path)+
+        "\n\nFound via: "+match.source+
+        "\nMatched name: "+match.label+
+        "\n\nLaunch only this exact executable? No permission is saved.",
+        (name, str(path), str(info.st_size), str(info.st_mtime_ns)))
+
+
 def prepare_pc_plan(plan: PCPlan, *, roots: dict[str, Path] | None = None) -> PCPlan:
     """Preflight file moves so the confirmation shows EVERY actual filename."""
     if plan.kind != "move_assets":
@@ -416,7 +456,7 @@ def execute_pc_plan(plan: PCPlan, *, approved: bool = False,
     if not isinstance(plan, PCPlan) or plan.kind not in (
         "launch_app", "open_folder", "open_url", "folder_summary",
         "list_windows", "focus_window", "type_text", "rename_file", "create_note",
-        "move_assets"
+        "move_assets", "launch_discovered_app"
     ):
         raise PCActionError("Invalid proposed Windows operation")
     if (platform or sys.platform) != "win32":
@@ -432,6 +472,17 @@ def execute_pc_plan(plan: PCPlan, *, approved: bool = False,
     focus_window = focus_window or _focus_hwnd
     type_writer = type_writer or _type_unicode
     kind = plan.kind
+    if kind == "launch_discovered_app":
+        name, raw, size, mtime = plan.args
+        normalise_name(name)
+        path = _validate_exe(Path(raw))
+        if path is None or str(path) != raw:
+            raise PCActionError("Approved app executable path changed")
+        info = path.stat()
+        if info.st_size != int(size) or info.st_mtime_ns != int(mtime):
+            raise PCActionError("The discovered executable changed since approval")
+        app_launcher(str(path))
+        return "Launched "+name+" from the owner-approved discovered executable."
     if kind == "launch_app":
         name, origin, expected = plan.args
         current = (_trusted_builtin(name) if origin == "builtin" else registered.get(name))
