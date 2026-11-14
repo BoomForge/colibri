@@ -164,9 +164,11 @@ class ChatView(tk.Frame):
         self.messages = []
         self._wheel_active = False
         self._queued_scroll = False
+        self._follow_output = True
+        self._load_scroll_revision = 0
         self.canvas = tk.Canvas(self, bg=bg, borderwidth=0, highlightthickness=0)
         self.scrollbar = tk.Scrollbar(self, orient="vertical",
-                                     command=self.canvas.yview,
+                                     command=self._scroll_command,
                                      background=COLORS["header"],
                                      activebackground=COLORS["selected"],
                                      troughcolor=bg, width=11)
@@ -185,6 +187,25 @@ class ChatView(tk.Frame):
         self.canvas.bind_all("<Button-5>", self._scroll_linux, add="+")
         self._wrap_width = 660
 
+    def _scroll_command(self, *args):
+        self.canvas.yview(*args)
+        self._follow_output = self._near_bottom()
+
+    def show_latest(self):
+        """Ensure restored chats end on newest turn after geometry settles."""
+        self._load_scroll_revision += 1
+        revision = self._load_scroll_revision
+        self._follow_output = True
+        for delay in (0, 70, 220):
+            self.after(delay, lambda rev=revision: self._finish_reload_scroll(rev))
+
+    def _finish_reload_scroll(self, revision):
+        if revision != self._load_scroll_revision or not self._follow_output:
+            return
+        if self.canvas.winfo_exists():
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            self.canvas.yview_moveto(1.0)
+
     def _set_wheel(self, active: bool):
         self._wheel_active = active
 
@@ -192,10 +213,12 @@ class ChatView(tk.Frame):
         if self._wheel_active and self.canvas.winfo_exists():
             self.canvas.yview_scroll(-int(event.delta / 120 or (1 if event.delta > 0 else -1)),
                                      "units")
+            self._follow_output = self._near_bottom()
 
     def _scroll_linux(self, event):
         if self._wheel_active and self.canvas.winfo_exists():
             self.canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
+            self._follow_output = self._near_bottom()
 
     def _on_content(self, _event):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -222,7 +245,7 @@ class ChatView(tk.Frame):
             return True
 
     def _maybe_follow(self, *, always=False):
-        if (always or self._near_bottom()) and not self._queued_scroll:
+        if (always or (self._follow_output and self._near_bottom())) and not self._queued_scroll:
             self._queued_scroll = True
             self.after_idle(self._scroll_bottom)
 
@@ -238,6 +261,7 @@ class ChatView(tk.Frame):
         self.messages.clear()
         self._previous_day = self._previous_role = self._previous_time = None
         self._previous_sender = None
+        self._follow_output = True
         self._maybe_follow(always=True)
 
     def notice(self, content: str):
@@ -319,7 +343,7 @@ class ChatView(tk.Frame):
         self._previous_sender = sender
         self._previous_day = day
         self._previous_time = date
-        self._maybe_follow(always=True)
+        self._maybe_follow(always=self._follow_output)
         return message
 
     def _copy_menu(self, event, message):
@@ -411,15 +435,16 @@ class ChatView(tk.Frame):
             suffix = "\n" + status
             message["content"] += suffix
             message["body"].render(message["content"])
-        self._maybe_follow(always=True)
+        self._maybe_follow(always=self._follow_output)
 
 
 class ConversationList(tk.Frame):
     """Compact scrollable DM list with selected state and avatar icons."""
-    def __init__(self, parent, on_select, *, background=None):
+    def __init__(self, parent, on_select, *, on_delete=None, background=None):
         bg = background or COLORS["sidebar"]
         super().__init__(parent, bg=bg)
         self._on_select = on_select
+        self._on_delete = on_delete
         self.avatars = AvatarBank()
         self.avatar = None
         self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
@@ -437,6 +462,20 @@ class ConversationList(tk.Frame):
                          self.canvas.itemconfigure(self.win_id, width=e.width))
         self.canvas.bind("<MouseWheel>", lambda e:
                          self.canvas.yview_scroll(-int(e.delta / 120 or 1), "units"))
+
+    def _conversation_menu(self, event, chat_id):
+        if self._on_delete is None:
+            return
+        menu = tk.Menu(self, tearoff=False,
+                       bg=COLORS["header"], fg=COLORS["text"],
+                       activebackground=COLORS["selected"])
+        menu.add_command(label="Delete conversation…",
+                         command=lambda: self._on_delete(chat_id))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+            menu.destroy()
 
     def set_avatar(self, path):
         self.avatar = path
@@ -465,4 +504,6 @@ class ConversationList(tk.Frame):
             title_label.pack(side="left", fill="x", expand=True, padx=(0, 5))
             for item in (row, image, title_label):
                 item.bind("<Button-1>", lambda _e, ident=chat_id: self._on_select(ident))
+                item.bind("<Button-3>", lambda e, ident=chat_id:
+                          self._conversation_menu(e, ident))
             self.rows[chat_id] = row
