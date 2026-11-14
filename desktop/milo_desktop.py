@@ -45,6 +45,15 @@ from colibri.milo_core.legacy_archive import (
 from colibri.milo_core.portable_backup import BackupError, export_bundle, import_bundle
 from colibri.milo_core.provider import LocalOpenAIProvider, ProviderError
 from colibri.milo_core.store import LocalMemoryStore
+from colibri.milo_core.documents import (
+    DocumentError, import_document, init_documents,
+    list_documents, remove_document,
+)
+from colibri.milo_core.web_research import (
+    ResearchError, init_web_prefs, web_enabled,
+    set_web_enabled, wants_research, query_for_research,
+    search_public_web, source_context, source_footer,
+)
 from colibri.milo_core.bots import (
     Bot, ChatSettings, attributed_messages, chat_settings,
     get_bot, init_bot_schema, list_bots, model_for_turn,
@@ -78,6 +87,7 @@ DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "shar
 DB_PATH = DATA_DIR / "memory.sqlite3"
 CONFIG_PATH = DATA_DIR / "settings" / "preferences.json"
 AVATARS = DATA_DIR / "avatars"
+DOCUMENTS = DATA_DIR / "documents"
 ORIGINAL_ARCHIVES = DATA_DIR / "original_archives"
 BRAND_AVATAR = install_root() / "Assets" / "milo_profile.png"
 BRAND_ICON = install_root() / "Assets" / "Milo.ico"
@@ -189,6 +199,9 @@ class MiloDesktop:
         self.config["model_directory"] = str(self.models_root)
         self.db = LocalMemoryStore(DB_PATH)
         init_bot_schema(self.db.db)
+        init_documents(self.db.db)
+        init_web_prefs(self.db.db)
+        DOCUMENTS.mkdir(parents=True, exist_ok=True)
         self.active_model_location = ""
         self.loading_model_location = ""
         self.pending_send = None
@@ -426,7 +439,12 @@ class MiloDesktop:
             self.bot_side, "＋   Create specialist bot", self._edit_bot_window)
         self.new_bot_button.configure(bg=SIDEBAR, fg=VIOLET, anchor="w",
                                       font=(FONT, 9), pady=9)
-        self.new_bot_button.pack(side="bottom", fill="x", padx=10, pady=(7, 12))
+        self.new_bot_button.pack(side="bottom", fill="x", padx=10, pady=(7, 9))
+        self.core_docs_button = new_button(
+            self.bot_side, "▤   Core Knowledge", lambda: self.documents_window("core"))
+        self.core_docs_button.configure(
+            bg=SIDEBAR, fg=MUTED, font=(FONT, 9), anchor="w", pady=8)
+        self.core_docs_button.pack(side="bottom", fill="x", padx=10)
 
     def _bot_avatar_path(self, bot):
         if bot is None:
@@ -464,6 +482,11 @@ class MiloDesktop:
                 except tk.TclError:
                     pass
         if bot_id != "milo":
+            docs = new_button(
+                row, "▤", lambda k=bot_id: self.documents_window(k))
+            docs.configure(bg=SIDEBAR, fg=VIOLET, font=(FONT, 10),
+                           padx=3, pady=3)
+            docs.pack(side="right", padx=(0, 1))
             edit = new_button(row, "⋯", lambda k=bot_id: self._edit_bot_window(k))
             edit.configure(bg=SIDEBAR, fg=MUTED, font=(FONT, 11),
                            padx=3, pady=3)
