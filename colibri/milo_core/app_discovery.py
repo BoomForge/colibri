@@ -20,6 +20,7 @@ MAX_REGISTRY_KEYS = 4500
 _EXE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+\-]{0,79}$")
 _UNSAFE = frozenset((
     "cmd", "command prompt", "powershell", "pwsh", "terminal",
+    "program", "software", "windows", "file explorer",
     "regedit", "registry editor", "task manager", "taskmgr",
     "windows security", "security", "administrator", "admin",
     "system", "control panel", "settings", "startup", "run",
@@ -67,6 +68,16 @@ def _tokens(text: str) -> list[str]:
 def _score(name: str, target: Path, label: str) -> int:
     aliases = _KNOWN_EXES.get(name, ())
     stem = target.stem.casefold()
+    # Installation directories contain uninstallers, updaters, crash
+    # reporters and setup helpers. Never suggest one as the application.
+    blocked = ("unins", "uninstall", "unwise", "setup", "install",
+               "update", "crashpad", "crashreport", "crashhandler",
+               "elevate", "repair", "helper", "service")
+    if any(stem == word or stem.startswith(word+"_") or
+           stem.startswith(word+"-") for word in blocked):
+        return 0
+    if stem.startswith("unins") or stem.startswith("uninstall"):
+        return 0
     compact = "".join(_tokens(name))
     exe = "".join(_tokens(stem))
     label_norm = "".join(_tokens(label))
