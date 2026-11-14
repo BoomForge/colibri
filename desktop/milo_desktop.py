@@ -4015,6 +4015,17 @@ def ui_self_test() -> int:
             assert app.advanced_open
             app.toggle_advanced()
             mark("after sidebar")
+            # Real PC-control entrypoint must survive PyInstaller packaging and
+            # expose the exact locally permitted operations without starting
+            # them or needing an LLM.
+            preview_plan = parse_pc_request("open downloads")
+            assert preview_plan and preview_plan.kind == "open_folder"
+            assert parse_pc_request("run powershell") is None
+            control_window = app.pc_control_window()
+            assert control_window.winfo_exists(), (
+                "PC control and app registry panel did not open")
+            control_window.destroy()
+            mark("after PC broker panel and deterministic command route")
             # The frozen installer must include pystray's native Windows backend,
             # not merely compile the lazy-loading tray wrapper successfully.
             if getattr(sys, "frozen", False) and sys.platform == "win32":
