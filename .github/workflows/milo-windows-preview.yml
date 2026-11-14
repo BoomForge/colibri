@@ -1,0 +1,61 @@
+name: Milo Windows Desktop Preview
+
+on:
+  push:
+    branches:
+      - feature/milo-desktop-core-20261114
+    paths:
+      - "desktop/milo_desktop.py"
+      - "desktop/README-MILO.md"
+      - "colibri/milo_core/**"
+      - "tests/test_milo*.py"
+      - ".github/workflows/milo-windows-preview.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    name: Build portable native Windows Milo
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install portable packaging dependencies
+        shell: pwsh
+        run: python -m pip install "pyinstaller>=6.10,<7" "cryptography>=42,<51"
+      - name: Compile Python MVP and smoke-test without live inference
+        shell: pwsh
+        run: |
+          python -m compileall -q colibri/milo_core desktop/milo_desktop.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p "test_milo*.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m desktop.milo_desktop --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build standalone Windows application
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name Milo --paths . --collect-all cryptography desktop/milo_desktop.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path 'dist/Milo/Milo.exe')) { throw "Missing bundled desktop application" }
+      - name: Test bundled exe without a display or model server
+        shell: pwsh
+        run: |
+          & .\dist\Milo\Milo.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Milo executable smoke test failed" }
+      - name: Package a portable directory
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/Milo/*" -DestinationPath "Milo-Windows-Preview.zip" -CompressionLevel Optimal
+          if (!(Test-Path 'Milo-Windows-Preview.zip')) { throw "Missing portable ZIP" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Milo-Windows-Preview
+          path: Milo-Windows-Preview.zip
+          if-no-files-found: error
+          retention-days: 30
