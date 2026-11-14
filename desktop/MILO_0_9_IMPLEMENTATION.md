@@ -1,77 +1,102 @@
-# Milo 0.9 — Desktop awareness foundation
+# Milo 0.9 — Desktop awareness, local vision and reviewed actions
 
-**Status: implementation branch, not a packaged 0.9 release.**
-Base: Milo 0.8 from feature/milo-desktop-core-20261114.
-Work branch: feature/milo-09-desktop-awareness.
+**Status:** working development branch and unsigned Windows installer PREVIEW.
+**Production release:** Milo 0.8.0 remains unchanged. No 0.9 GitHub Release
+has been published or offered through Milo's automatic updater.
+**Branch:** feature/milo-09-desktop-awareness.
+**Draft PR:** https://github.com/BoomForge/colibri/pull/1
 
-This code adds usable, opt-in features without replacing Milo's conversation
-model, personality, private database or installed model checkpoints.
+## Implemented
 
-## Implemented in source
+### Quick chat and screen
+- Windows global Ctrl+Shift+M shortcut using RegisterHotKey (no key
+  interception or keylogging), with an opt-out in Settings.
+- Compact, always-on-top quick-chat composer; it submits into the existing
+  Milo conversation rather than creating a parallel identity or database.
+- Every PRIMARY-screen capture requires an explicit yes/no confirmation.
+  The application hides during capture, previews the temporary local PNG and
+  queues it as a chat attachment. No continuous screen sharing.
 
-- **Global quick chat:** Windows OS RegisterHotKey for Ctrl+Shift+M.
-  Uses a message-only worker, no keyboard hook or key recording. A native
-  compact quick-chat window submits into the selected Milo conversation.
-  The shortcut can be switched off in Settings. A visible button remains
-  available if another app owns the hotkey.
-- **One-time screen capture:** Screen button beside chat attachments. Explicit
-  user confirmation before EVERY capture. Milo temporarily hides, captures
-  only the primary screen once, and presents the local PNG for review.
-  The resulting file is a queued attachment, not an automatic network
-  upload or background screenshot. Unsaved captures are removed when cleared,
-  on exit and on the next startup. 15 MB attachment limit applies.
-- **Tool activity:** local SQLite history of approved/denied/started/
-  completed/failed/cancelled events, capped to 300 rows. Only predefined
-  tool names and statuses are stored; no prompts, filenames, tokens,
-  screenshots, URLs or full search queries. The Tool activity panel can
-  inspect and clear it. Existing file and web tool routes report status.
-- **Windows settings actions:** deterministic, fixed allowlist for Display,
-  Sound, Bluetooth, Storage and Startup Apps settings. Works through the
-  Windows tools panel or explicit conversation commands such as "open display
-  settings". Shows the exact ms-settings: URI for individual approval.
-  It does not use a shell or arbitrary executable, and never modifies
-  settings directly.
-- **Memory provenance and corrections:** memory manager displays the original
-  source of an approved note and allows an explicit owner-approved correction.
-  SQLite keeps a local correction-history record; deleting the note also
-  deletes its stored correction history. Specialist bots do not automatically
-  inherit Milo's private notes.
+### Independent local image understanding
+- Local vision is OFF by default and is separately toggleable in Milo's
+  feature manager and Settings. It does not replace Colibri's text model.
+- The first backend is Ollama's local image API with an explicitly selected
+  model, default suggestion qwen3-vl:2b. Milo does NOT install Ollama or model
+  weights automatically.
+- To enable after installing Ollama, the owner may choose to run:
+      ollama pull qwen3-vl:2b
+  Qwen3-VL requires a compatible Ollama version (0.12.7 or later).
+- Settings: Enable local image analysis; choose installed Ollama model and
+  loopback URL, normally http://127.0.0.1:11434.
+- On sending attached images, Milo asks permission for that exact request.
+  Only the selected image(s) and present question are sent to loopback.
+  The adapter rejects remote hosts, proxy configuration and redirects;
+  images are resized for inference. Maximum three images per vision request.
+- The returned analysis is labelled as a separate model's observation and
+  supplied to the normal conversation model only after completion.
+  Failure produces an explicit error, not an invented visual description.
+- The vision model is requested to unload after each analysis. This helps
+  conserve VRAM, but real performance with a GTX 1660 6GB and a concurrent
+  chat model is **not yet verified**.
 
-## Validation
+### Local actions and memory
+- Read-only deterministic filename and file-preview tools remain available.
+- A new File organiser accepts two owner-selected local folders and a literal
+  filename filter; it shows the EXACT proposed file list before approving
+  a same-drive move. Maximum 100 supported non-executable asset files per
+  plan. Preflight checks detect modified sources, symlinks and destination
+  collisions; operations use no-overwrite hardlinks on the same filesystem.
+  Depending on permissions or filesystem type, a move may be rejected rather
+  than falling back to an unsafe operation.
+- Explicit Windows Settings requests (Display, Sound, Bluetooth, Storage,
+  Startup Apps) are allowlisted and confirmed separately before launch.
+  No arbitrary executable or shell commands are accepted.
+- Source-labelled approved memory notes can be inspected, corrected with
+  explicit approval and removed. The original source and correction count
+  remain local. No automatic promotion of chat text to long-term memory.
+- Fixed-label local activity events record tool type and outcome without
+  logging screenshots, file paths, prompts or source document contents.
 
-- Core regressions use GitHub Actions milo-core.yml.
-- Native Windows GUI smoke uses
-  .github/workflows/milo-09-windows-smoke.yml.
-- Smoke checks exercise the Tk quick-chat window, activity UI and Windows
-  tools panel without triggering a real screen capture or OS-settings launch.
-- Automated tests verify the screenshot module, activity bounds, Windows
-  action allowlist, and memory correction approval/provenance.
+## Build verification and download
 
-## Still NOT implemented or verified
+The unsigned 0.9 installer preview is produced by:
+https://github.com/BoomForge/colibri/actions/workflows/milo-09-preview-installer.yml
 
-- **Actual image understanding**: the existing Colibri chat model is
-  text-only; a vision-provider module and image inference routing are still
-  required. A screenshot attachment cannot yet be analysed as pixels.
-- Desktop-wide automated clicking/typing, filesystem moves, task scheduling,
-  voice conversations or generalized computer-use agents.
-- A new signed or installable 0.9 release. App version remains 0.8
-  until an independently checked installer is built and deliberately released.
-- Real use of the global hotkey on the owner's PC or screen capture on the
-  owner's display; CI tests use mocked capture or GUI smoke only.
+Use the latest SUCCESSFUL run for this branch; open its Artifacts section and
+download **Milo-Installer-0.9.0-Preview**. Extract the artifact ZIP and run
+Milo-Setup-0.9.0.exe. Do not install if the run is failed or incomplete.
+No external Ollama or vision weights are bundled in the Windows installer.
+The previous 0.8.0 is the publicly published fallback release.
 
-## Manual acceptance checklist for the next packaged build
+The preview workflow verifies its pinned 13-engine Colibri runtime checksums,
+runs Milo regressions, packages the current Tk Windows app and official Milo
+icon, tests the frozen binary, runs a silent NSIS install, and tests an upgrade
+with a model preservation sentinel. It NEVER publishes a GitHub Release.
 
-1. With Milo installed, Ctrl+Shift+M opens quick chat from another app.
-   In Settings, disabling it frees the shortcut.
-2. Screen shows consent first, hides Milo during one primary-screen
-   capture, then displays an image preview and queues a local attachment.
-3. "Open display settings" asks first, launches only the approved Windows
-   page, and confirms the result without pretending to change a setting.
-4. Tool activity shows only approved fixed-label statuses and is clearable.
-5. An existing approved memory can be viewed with its source, corrected
-   with approval, and deleted without orphaned revision records.
-6. Conversation, imported personality, model checkpoints, avatar and
-   installed module settings survive a later installer upgrade.
+## Not yet tested/implemented
 
-Do not publish owner archives, captured screenshots or personal memory data
-into GitHub or the updater catalog.
+- End-to-end local vision output on the owner's Windows GPU and actual
+  selected Ollama model (CI uses synthetic / mocked image responses).
+- Real desktop hotkey conflicts and screenshot capture on the owner's monitor.
+- Voice, computer-wide autonomous clicking/typing, arbitrary Windows settings
+  changes, email/calendar actions and ongoing agentic automation.
+- Full-featured cross-volume file moves or bulk operations without previews.
+- Code signing. Do not bypass Windows Smart App Control.
+
+## Owner acceptance
+
+1. Back up %LOCALAPPDATA%\Milo and the existing Models directory.
+2. Install the verified preview, confirm your original conversations,
+   personality, avatars and model selections remain.
+3. Test Ctrl+Shift+M, disable it in Settings, and re-enable if desired.
+4. Capture a screen only after consent; inspect its local preview.
+5. Optionally install Ollama and a small vision model manually, enable vision
+   in Settings, attach one screenshot, approve its analysis and verify that
+   Milo uses the output rather than claiming direct visual perception.
+6. Try File organiser on disposable test assets. Preview, approve and check
+   contents; test destination name collisions before production files.
+7. Confirm Tool activity records only actions/statuses, not file paths.
+8. Test Windows Settings shortcuts with explicit approval.
+
+Do not commit owner screenshots, chat transcripts, private memory archives,
+personal backups, or model weights to this repository or public releases.
