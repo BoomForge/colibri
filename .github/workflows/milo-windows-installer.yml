@@ -72,6 +72,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p "test_milo*.py" -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m desktop.milo_desktop --ui-self-test
+          if ($LASTEXITCODE -ne 0) {
+            $trace = Join-Path $env:TEMP "milo-ui-diagnostics.log"
+            if (Test-Path $trace) { Get-Content $trace | Select-Object -Last 100 | Write-Host }
+            throw "Python source native GUI smoke failed"
+          }
       - name: Build current Milo.exe with embedded modules and icon
         shell: pwsh
         run: |
