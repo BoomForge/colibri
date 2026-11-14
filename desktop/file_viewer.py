@@ -12,7 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from colibri.milo_core.desktop_actions import (
     IMAGE_TYPES, validate_preview_path,
@@ -194,7 +194,7 @@ def open_preview(root, source: Path):
                 body.configure(font=("Consolas", font_size[0]))
 
             def find():
-                needle = tk.simpledialog.askstring(
+                needle = simpledialog.askstring(
                     "Find in document", "Find text:", parent=window)
                 if not needle:
                     return
