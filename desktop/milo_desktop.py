@@ -1063,6 +1063,10 @@ class MiloDesktop:
     def _launch_managed_model(self, selected: Path):
         if self.engine_starting or self.busy:
             return
+        model_relative = os.path.relpath(selected, self.models_root)
+        if self.active_model_location == model_relative and self.model_ready:
+            return
+        self.loading_model_location = model_relative
         self.engine_starting = True
         self.model_ready = False
         self.connection_label.configure(
@@ -1080,7 +1084,7 @@ class MiloDesktop:
                 models = list_models(endpoint)
                 if not models:
                     raise EngineStartupError("model loaded but chat API has no chat-capable models")
-                self.events.put(("managed_ready", endpoint, models))
+                self.events.put(("managed_ready", endpoint, models, model_relative))
             except Exception as exc:
                 self.engine.stop()
                 self.events.put(("engine_error", str(exc)[:400]))
@@ -1093,8 +1097,10 @@ class MiloDesktop:
                 kind = event[0]
                 if kind == "managed_ready":
                     self.engine_starting = False
+                    self.loading_model_location = ""
                     self.active_base_url = event[1]
                     self.models = event[2]
+                    self.active_model_location = event[3]
                     if self.config.get("model") not in self.models:
                         self.config["model"] = self.models[0]
                         save_config(self.config)
@@ -1102,8 +1108,28 @@ class MiloDesktop:
                     self.connection_label.configure(
                         text="● Bundled Colibri  •  " + self.config["model"],
                         fg="#9fdfb4")
+                    waiting = self.pending_send
+                    if waiting and waiting[0] == self.current_chat:
+                        if waiting[2] == self.active_model_location:
+                            self.pending_send = None
+                            if (not self.busy and not self.entry_placeholder and
+                                self.entry.get("1.0", "end-1c").strip() == waiting[1]):
+                                self.root.after(40, self.send)
+                        else:
+                            # A user-selected model may differ from the chat's
+                            # default or the specialist bot's preferred model.
+                            candidate = chosen_model(self.models_root, waiting[2])
+                            if candidate:
+                                self._launch_managed_model(candidate)
+                    else:
+                        self.pending_send = None
+                        self._ensure_chat_model()
+                    self._refresh_chat_context()
                 elif kind == "engine_error":
                     self.engine_starting = False
+                    self.active_model_location = ""
+                    self.loading_model_location = ""
+                    self.pending_send = None
                     self.model_ready = False
                     self.connection_label.configure(
                         text="● Colibri startup failed  •  Open Models", fg=ORANGE)
