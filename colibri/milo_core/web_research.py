@@ -27,9 +27,11 @@ MAX_HTML = 350_000
 MAX_RESULTS = 5
 _WORDS = re.compile(r"\s+")
 _REQUEST = re.compile(
-    r"\b(?:research|search\s+(?:the\s+)?(?:web|internet|online)|"
-    r"look\s+(?:it\s+)?up\s+online|browse\s+(?:the\s+)?web|"
-    r"find\s+(?:online\s+)?sources|web\s+search|fact[- ]check\s+online)\b", re.I
+    r"\b(?:research\b|search\s+(?:the\s+)?(?:web|internet|online)\b|"
+    r"search\s+(?:for\s+)?[^\n]{2,190}?\s+online\b|"
+    r"look\s+(?:it\s+)?up\s+online\b|browse\s+(?:the\s+)?web\b|"
+    r"find\s+(?:online\s+)?sources\b|web\s+search\b|"
+    r"fact[- ]check\s+online\b)\b", re.I
 )
 _TAG = re.compile(r"<[^>]+>")
 
@@ -56,8 +58,24 @@ def query_for_research(prompt: str) -> str:
     clean = _WORDS.sub(" ", prompt.strip())
     if not 4 <= len(clean) <= 400:
         raise ResearchError("Search request must be 4–400 characters")
-    # Query originates from user's current message, never an LLM-generated
-    # tool call, imported document, web page, or historical transcript.
+    # Strip harmless common spoken-command wrappers, not the subject itself.
+    # Search query must originate from this user message, NEVER from an
+    # imported document, previous conversation, model output or web page.
+    clean = re.sub(
+        r"^(?:can you |could you |please |would you |"
+        r"i want you to |i need you to )+",
+        "", clean, flags=re.I)
+    clean = re.sub(
+        r"^(?:search(?: the web)?(?: for)?|research|look up|"
+        r"find online sources (?:about|for)?|browse the web for)\s+",
+        "", clean, flags=re.I)
+    clean = re.sub(
+        r"\s+(?:online|on the internet|on the web)(?:\s+for me)?"
+        r"(?:\s+please)?\s*$", "", clean, flags=re.I)
+    clean = re.sub(r"\s+(?:for me|please)\s*$", "", clean, flags=re.I)
+    clean = clean.strip(" ,.!?")
+    if len(clean) < 2:
+        raise ResearchError("Please provide a topic to research")
     return clean[:240]
 
 
@@ -219,6 +237,27 @@ def source_context(sources: list[WebSource]) -> str:
                else "The full page could not be read; snippet only.")
         )
     return "\n\n".join(lines)
+
+
+def search_results_reply(query: str, sources: list[WebSource]) -> str:
+    """A truthful source list even when no chat model is loaded."""
+    if not sources:
+        raise ResearchError("Search returned no verifiable public sources")
+    lines = [
+        "Live public web search results for: " + query,
+        "Click any HTTPS URL to open it in your browser. "
+        "These are search results, not independently verified claims.",
+        "",
+    ]
+    for index, source in enumerate(sources, 1):
+        lines.extend([
+            f"[W{index}] {source.title}",
+            source.url,
+            ("From page: " if source.body else "Search snippet only: ") +
+            (source.body[:520] if source.body else source.snippet[:520]),
+            "",
+        ])
+    return "\n".join(lines).strip()
 
 
 def source_footer(sources: list[WebSource]) -> str:
