@@ -94,7 +94,12 @@ jobs:
         run: |
           $exe = (Resolve-Path "dist/Milo/Milo.exe").Path
           foreach ($arg in @("--self-test", "--embedded-self-test", "--ui-self-test")) {
-            $p = Start-Process -FilePath $exe -ArgumentList $arg -Wait -PassThru
+            Write-Host "Testing bundled Milo $arg"
+            $p = Start-Process -FilePath $exe -ArgumentList $arg -PassThru
+            if (!$p.WaitForExit(25000)) {
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              throw "Bundled Milo $arg timed out (possible UI deadlock)"
+            }
             if ($p.ExitCode -ne 0) { throw "Milo binary failed $arg with exit $($p.ExitCode)" }
           }
       - name: Compile actual Windows installer using NSIS
@@ -121,7 +126,12 @@ jobs:
           $second = Start-Process -FilePath $exe -ArgumentList "/S" -Wait -PassThru
           if ($second.ExitCode -ne 0 -or !(Test-Path $modelTest)) { throw "Model data lost after upgrade" }
           foreach ($arg in @("--embedded-self-test", "--ui-self-test")) {
-            $p = Start-Process -FilePath $installedExe -ArgumentList $arg -Wait -PassThru
+            Write-Host "Testing installed Milo $arg"
+            $p = Start-Process -FilePath $installedExe -ArgumentList $arg -PassThru
+            if (!$p.WaitForExit(25000)) {
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              throw "Installed Milo $arg timed out"
+            }
             if ($p.ExitCode -ne 0) { throw "Installed app failed $arg" }
           }
       - name: Package optional module catalog
