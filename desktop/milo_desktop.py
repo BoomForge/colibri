@@ -4020,7 +4020,7 @@ def ui_self_test() -> int:
                 assert button.winfo_rootx() + button.winfo_width() <= right, (
                     "Composer action button extends outside visible area")
             app._composer_focus_in(None)
-            app.entry.insert("1.0", "Line one\\nLine two")
+            app.entry.insert("1.0", "Line one\nLine two")
             app._resize_composer()
             assert 2 <= int(app.entry.cget("height")) <= 4, (
                 "Multiline input must expand within its cap")
