@@ -14,6 +14,7 @@ TOOLS = frozenset({
     "pc_launch_app", "pc_open_folder", "pc_open_url", "pc_folder_summary",
     "pc_list_windows", "pc_focus_window", "pc_type_text", "pc_rename_file",
     "pc_create_note", "pc_move_assets", "pc_app_registration",
+    "pc_app_search", "pc_launch_discovered_app",
 })
 OUTCOMES = frozenset({
     "approved", "denied", "started", "completed", "failed", "cancelled", "revoked",
