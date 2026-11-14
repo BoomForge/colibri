@@ -30,6 +30,11 @@ except ImportError:
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from desktop.chat_view import ChatView, ConversationList, COLORS, avatar_widget, AvatarBank
 
+from colibri.milo_core.global_hotkey import GlobalQuickChatHotkey
+from colibri.milo_core.tool_activity import (
+    init_activity, record_activity, list_activity, clear_activity,
+)
+from desktop.screen_capture import capture_primary_screen, ScreenCaptureError
 from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
 from colibri.milo_core.filesystem import find_files_by_prefix
@@ -222,11 +227,24 @@ class MiloDesktop:
         ensure_specialists(self.db.db, self.models_root)
         init_documents(self.db.db)
         init_web_prefs(self.db.db)
+        init_activity(self.db.db)
         DOCUMENTS.mkdir(parents=True, exist_ok=True)
         self.active_model_location = ""
         self.loading_model_location = ""
         self.pending_send = None
         self.events: queue.Queue[tuple] = queue.Queue()
+        self.quick_hotkey = GlobalQuickChatHotkey(self.events)
+        self.session_captures: list[Path] = []
+        self.active_tool: str | None = None
+        capture_folder = DATA_DIR / "captures"
+        if capture_folder.exists() and not capture_folder.is_symlink():
+            # Screenshots are temporary; remove orphaned images from old sessions.
+            for old in capture_folder.glob("screen-*.png"):
+                if old.is_file() and not old.is_symlink():
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
         self.busy = False
         self.cancel = threading.Event()
         self.model_download_cancel = threading.Event()
@@ -249,6 +267,8 @@ class MiloDesktop:
         self._ensure_chat_model()
         self.root.after(70, self._pump)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+        if "--ui-self-test" not in sys.argv:
+            self.quick_hotkey.start()
 
     def _build(self):
         self.side = tk.Frame(self.root, bg=SIDEBAR, width=260,
@@ -273,6 +293,7 @@ class MiloDesktop:
             background=SIDEBAR)
         self.chat_list.pack(fill="both", expand=True, padx=(5, 5))
         self.root.bind("<Control-k>", lambda _e: self.search_conversations())
+        self.root.bind("<Control-Shift-m>", lambda _e: self.show_quick_chat())
 
         search_chats = new_button(
             self.side, "⌕   Search conversations (Ctrl+K)",
@@ -298,6 +319,7 @@ class MiloDesktop:
         actions = [
             ("Models", self.models_window, "models"),
             ("Updates & modules", self.updates_modules_window, None),
+            ("Tool activity", self.activity_window, None),
             ("Memory", self.memory_window, "memory"),
             ("Restore Milo personality", self.restore_milo_personality, "memory"),
             ("Find files", self.find_files_window, "files"),
@@ -363,6 +385,11 @@ class MiloDesktop:
         self.connection_label = tk.Label(label_stack, text="Checking local model...",
                                          bg=PANEL, fg=MUTED, font=(FONT, 9))
         self.connection_label.pack(anchor="w", pady=(3, 0))
+        quick_button = new_button(
+            heading, "Quick chat  Ctrl+Shift+M", self.show_quick_chat)
+        quick_button.configure(bg=PANEL_BRIGHT, fg=VIOLET,
+                               padx=9, pady=6, font=(FONT, 9))
+        quick_button.pack(side="right", padx=(0, 6), pady=17)
         reconnect = new_button(heading, "↻  Reconnect", self.check_connection)
         reconnect.configure(bg=PANEL_BRIGHT, fg=MUTED,
                             padx=12, pady=6, font=(FONT, 9))
@@ -414,6 +441,10 @@ class MiloDesktop:
         attach.configure(bg=PANEL, fg=VIOLET,
                          padx=7, pady=7, font=(FONT, 9))
         attach.pack(side="left", padx=(0, 2), pady=7)
+        capture = new_button(composer, "▣ Screen", self.capture_screen)
+        capture.configure(bg=PANEL, fg=VIOLET,
+                          padx=7, pady=7, font=(FONT, 9))
+        capture.pack(side="left", padx=(0, 2), pady=7)
         self.entry = tk.Text(
             composer, height=2, wrap="word", font=(FONT, 11),
             bg=PANEL, fg=FG, insertbackground=VIOLET,
@@ -1292,7 +1323,173 @@ class MiloDesktop:
 
     def clear_attachments(self):
         self.queued_attachments = []
+        # Screenshots are private, short-lived scratch files. Staged copies
+        # remain in the conversation's attachment store if already sent.
+        for path in self.session_captures:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.session_captures.clear()
         self._update_attachment_status()
+
+    # ---- Global quick chat, consented screen attachment and activity ----
+
+    def _audit(self, tool: str, outcome: str) -> None:
+        """Fixed-label event only. Do not put user prompts or paths in this log."""
+        try:
+            record_activity(self.db.db, tool, outcome)
+        except sqlite3.Error:
+            pass
+
+    def _tool_begin(self, tool: str) -> None:
+        self.active_tool = tool
+        self._audit(tool, "started")
+
+    def _tool_finish(self, outcome: str) -> None:
+        tool = self.active_tool
+        self.active_tool = None
+        if tool:
+            self._audit(tool, outcome)
+
+    def show_quick_chat(self):
+        """Small, separate composition window; same chat and model as main UI."""
+        existing = getattr(self, "quick_popup", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
+        panel = tk.Toplevel(self.root)
+        self.quick_popup = panel
+        panel.title("Quick chat · Milo")
+        panel.configure(bg=BG)
+        panel.geometry("560x185")
+        panel.minsize(420, 160)
+        panel.attributes("-topmost", True)
+        tk.Label(panel, text="MILO · QUICK CHAT", bg=BG, fg=VIOLET,
+                 font=(FONT, 10, "bold")).pack(anchor="w", padx=18, pady=(14, 5))
+        text_entry = tk.Text(panel, height=3, wrap="word", font=(FONT, 11),
+                             bg=PANEL, fg=FG, insertbackground=VIOLET,
+                             relief="flat", padx=10, pady=8)
+        text_entry.pack(fill="both", expand=True, padx=18, pady=(0, 6))
+        footer = tk.Frame(panel, bg=BG)
+        footer.pack(fill="x", padx=18, pady=(0, 12))
+
+        def submit(_event=None):
+            prompt = text_entry.get("1.0", "end-1c").strip()
+            if not prompt:
+                return "break"
+            if self.busy:
+                messagebox.showinfo("Milo is responding",
+                    "Finish or stop the current response first. "
+                    "Your quick-chat text will stay here.", parent=panel)
+                return "break"
+            if len(prompt) > 20000:
+                messagebox.showerror("Message too long",
+                                     "Keep messages below 20,000 characters.",
+                                     parent=panel)
+                return "break"
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self.entry.delete("1.0", "end")
+            self.entry_placeholder = False
+            self.entry.configure(fg=FG)
+            self.entry.insert("1.0", prompt)
+            panel.destroy()
+            self.quick_popup = None
+            self._audit("quick_chat", "completed")
+            self.send()
+            return "break"
+
+        text_entry.bind("<Return>",
+            lambda event: None if event.state & 0x1 else submit(event))
+        panel.bind("<Escape>", lambda _event: panel.destroy())
+        tk.Label(footer, text="Enter to send · Shift+Enter for newline",
+                 bg=BG, fg=MUTED, font=(FONT, 8)).pack(side="left")
+        new_button(footer, "Send to Milo", submit, primary=True).pack(side="right")
+        panel.after(50, text_entry.focus_set)
+
+    def capture_screen(self):
+        """Every capture needs consent; no permanent screen-watch capability."""
+        if len(self.queued_attachments) >= MAX_ATTACHMENTS:
+            messagebox.showinfo("Attachments full",
+                "Clear an attachment before capturing the screen.",
+                parent=self.root)
+            return
+        if not messagebox.askyesno(
+                "Share a one-time screenshot",
+                "Capture your PRIMARY screen now?\n\n"
+                "Milo will temporarily hide, capture the display once, "
+                "then show the resulting image for review. It will be "
+                "queued as a LOCAL chat attachment, not uploaded.\n\n"
+                "Screenshots can contain private information. "
+                "The current text-only Colibri model cannot interpret pixels.",
+                parent=self.root):
+            self._audit("screen_capture", "denied")
+            return
+        self._audit("screen_capture", "approved")
+        self.root.withdraw()
+        self.root.after(320, self._capture_screen_after_hiding)
+
+    def _capture_screen_after_hiding(self):
+        image_path = None
+        try:
+            image_path = capture_primary_screen(DATA_DIR / "captures")
+            self._queue_attachments([image_path])
+            self.session_captures.append(image_path)
+            self._audit("screen_capture", "completed")
+        except (ScreenCaptureError, OSError, ValueError) as exc:
+            if image_path is not None:
+                image_path.unlink(missing_ok=True)
+            self._audit("screen_capture", "failed")
+            messagebox.showerror("Screen capture", str(exc)[:260],
+                                 parent=self.root)
+        finally:
+            self.root.deiconify()
+            self.root.lift()
+        if image_path is not None and image_path.exists():
+            try:
+                open_preview(self.root, image_path)
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("Screenshot preview", str(exc)[:220],
+                                     parent=self.root)
+
+    def activity_window(self):
+        window = self._panel("Tool activity",
+            "Local history of approvals, completions and failures. "
+            "Search terms, filenames, prompts and screenshots are not logged.")
+        listing = tk.Text(window, height=15, wrap="none",
+                          bg=BG, fg=FG, font=("Consolas", 9),
+                          relief="flat", padx=12, pady=9)
+        listing.pack(fill="both", expand=True, padx=20, pady=(8, 8))
+        def refresh():
+            entries = list_activity(self.db.db)
+            listing.configure(state="normal")
+            listing.delete("1.0", "end")
+            if not entries:
+                listing.insert("end", "No tool events recorded yet.")
+            else:
+                for timestamp, tool, outcome in entries:
+                    listing.insert(
+                        "end", timestamp[:19].replace("T", " ") + " UTC · " +
+                        tool.replace("_", " ") + " · " + outcome + "\n")
+            listing.configure(state="disabled")
+        controls = tk.Frame(window, bg=PANEL)
+        controls.pack(fill="x", padx=20, pady=(0, 12))
+        new_button(controls, "Refresh", refresh).pack(side="left")
+        def clear():
+            if messagebox.askyesno(
+                    "Delete activity history",
+                    "Delete the stored tool event history? "
+                    "This does not delete your chats or memories.",
+                    parent=window):
+                clear_activity(self.db.db)
+                refresh()
+        new_button(controls, "Clear activity history", clear).pack(side="right")
+        refresh()
+        return window
 
     def chat_view_selection(self):
         """One continuous selectable text area spanning all visible messages."""
@@ -1370,6 +1567,7 @@ class MiloDesktop:
                           if target_id == "milo" and
                           module_enabled(DATA_DIR, "files") else None)
         if requested_open is not None:
+            self._tool_begin("local_preview")
             chat_id = self.current_chat
             self._begin_tool_turn(chat_id, prompt, target_id,
                                   author_name, author_avatar)
@@ -1400,6 +1598,7 @@ class MiloDesktop:
                            if target_id == "milo" and module_enabled(DATA_DIR, "files")
                            else None)
         if requested_files is not None:
+            self._tool_begin("local_file_search")
             chat_id = self.current_chat
             self.entry.delete("1.0", "end")
             self.entry_placeholder = False
@@ -1450,7 +1649,10 @@ class MiloDesktop:
                 "Milo will never include your uploaded files, private memory "
                 "or previous conversations in the web request. "
                 "Read-only HTTPS sources only. Continue?"):
+                self._audit("web_research", "denied")
                 return
+            self._audit("web_research", "approved")
+            self._tool_begin("web_research")
             chat_id = self.current_chat
             available_model = (
                 self.model_ready and bool(self.models) and
@@ -1586,7 +1788,9 @@ class MiloDesktop:
                 "\n\nUploaded documents, memory, private transcripts and "
                 "specialist instructions are NOT uploaded. "
                 "Continue with this one search?"):
+                self._audit("web_research", "denied")
                 return
+            self._audit("web_research", "approved")
 
         # User-selected attachments enter the private application folder only
         # when a real chat turn is submitted. Attachments are not uploaded.
@@ -1739,7 +1943,13 @@ class MiloDesktop:
             while True:
                 event = self.events.get_nowait()
                 kind = event[0]
-                if kind == "managed_ready":
+                if kind == "quick_chat":
+                    self.show_quick_chat()
+                elif kind == "hotkey_unavailable":
+                    # The OS shortcut is already reserved by another app.
+                    # The visible Quick chat button remains available.
+                    pass
+                elif kind == "managed_ready":
                     self.engine_starting = False
                     self.loading_model_location = ""
                     self.active_base_url = event[1]
@@ -1907,6 +2117,9 @@ class MiloDesktop:
                             )
                     except Exception as exc:
                         reply = "I couldn't preview that file: " + str(exc)[:280]
+                        self._tool_finish("failed")
+                    else:
+                        self._tool_finish("completed")
                     self._save_direct_turn(
                         chat_id, prompt, reply, event[4], event[5],
                         event[6], event[7])
@@ -1918,6 +2131,7 @@ class MiloDesktop:
                     self._refresh_chat_list()
                     self._restore_service_status()
                 elif kind == "tool_error":
+                    self._tool_finish("failed")
                     chat_id, prompt, reply = event[1:4]
                     self._save_direct_turn(
                         chat_id, prompt, reply, event[4], event[5],
@@ -1930,6 +2144,7 @@ class MiloDesktop:
                     self._refresh_chat_list()
                     self._restore_service_status()
                 elif kind == "local_tool_done":
+                    self._tool_finish("completed")
                     if event[1] == self.current_chat and self.pending_message is not None:
                         self.chat_view.append_to(self.pending_message, event[2])
                         self.chat_view.finish(self.pending_message)
@@ -1942,6 +2157,7 @@ class MiloDesktop:
                     if event[1] == self.current_chat and self.pending_message is not None:
                         self.chat_view.append_to(self.pending_message, event[2])
                 elif kind == "done":
+                    self._tool_finish("completed")
                     if event[1] == self.current_chat and self.pending_message is not None:
                         self.chat_view.finish(self.pending_message)
                         self.pending_message = None
@@ -1950,6 +2166,7 @@ class MiloDesktop:
                     self._refresh_chat_context()
                     self._restore_service_status()
                 elif kind == "cancelled":
+                    self._tool_finish("cancelled")
                     if self.pending_message is not None:
                         self.chat_view.finish(
                             self.pending_message, status="Response cancelled · not saved")
@@ -1957,6 +2174,7 @@ class MiloDesktop:
                     self._set_busy(False)
                     self._restore_service_status()
                 elif kind == "error":
+                    self._tool_finish("failed")
                     if self.pending_message is not None:
                         self.chat_view.finish(
                             self.pending_message, status="Response incomplete · not saved")
@@ -2972,6 +3190,13 @@ class MiloDesktop:
         return window
 
     def _close(self):
+        self.quick_hotkey.stop()
+        for path in self.session_captures:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.session_captures.clear()
         self.cancel.set()
         self.model_download_cancel.set()
         self.engine.stop()
