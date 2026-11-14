@@ -104,5 +104,38 @@ class MemoryCorrectionTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM approved_note_edits").fetchone()[0], 0)
 
 
+class WindowsActionTests(unittest.TestCase):
+    def test_explicit_commands_only(self):
+        from colibri.milo_core.windows_actions import parse_action_request
+        self.assertEqual(
+            parse_action_request("Milo open display settings").action_id,
+            "display")
+        self.assertEqual(
+            parse_action_request("please show bluetooth settings").action_id,
+            "bluetooth")
+        for text in ("How do I open display settings?",
+                     "Could you explain display settings?",
+                     "run explorer.exe", "open ms-settings:display"):
+            self.assertIsNone(parse_action_request(text))
+
+    def test_exact_action_and_approval_gate(self):
+        from colibri.milo_core.windows_actions import (
+            plan_action, WindowsAction, execute_action)
+        opened = []
+        plan = plan_action("sound")
+        with self.assertRaises(PermissionError):
+            execute_action(plan, platform="win32", launcher=opened.append)
+        with self.assertRaises(ValueError):
+            execute_action(WindowsAction("sound", "Sound settings",
+                                         "file:///bad"), approved=True,
+                           platform="win32", launcher=opened.append)
+        with self.assertRaises(OSError):
+            execute_action(plan, approved=True,
+                           platform="linux", launcher=opened.append)
+        execute_action(plan, approved=True, platform="win32",
+                       launcher=opened.append)
+        self.assertEqual(opened, ["ms-settings:sound"])
+
+
 if __name__ == "__main__":
     unittest.main()
