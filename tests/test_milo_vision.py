@@ -41,13 +41,13 @@ class LocalVisionTests(unittest.TestCase):
             filename = Path(tmp) / "screen.png"
             Image.new("RGB", (19, 17), (20, 30, 40)).save(filename)
             captured = []
-            def fake_urlopen(request, timeout):
+            def fake_open_local(request, timeout):
                 captured.append((request.full_url, json.loads(request.data), timeout))
                 return BytesIO(json.dumps({
                     "message": {"role": "assistant",
                                 "content": "The window contains an error dialog."}
                 }).encode("utf-8"))
-            with mock.patch("colibri.milo_core.vision.urlopen", fake_urlopen):
+            with mock.patch("colibri.milo_core.vision._open_local", fake_open_local):
                 findings = OllamaLocalVision(
                     model="qwen3-vl:2b").analyse(
                         [filename], "What error do you see?", approved=True)
@@ -69,7 +69,7 @@ class LocalVisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             filename = Path(tmp) / "test.png"
             Image.new("RGB", (8, 8)).save(filename)
-            with mock.patch("colibri.milo_core.vision.urlopen",
+            with mock.patch("colibri.milo_core.vision._open_local",
                             return_value=BytesIO(b'{"message":{"content":""}}')):
                 with self.assertRaisesRegex(VisionError, "no valid description"):
                     OllamaLocalVision(model="qwen3-vl:2b").analyse(
