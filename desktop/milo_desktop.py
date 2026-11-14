@@ -63,7 +63,9 @@ from colibri.milo_core.bots import (
     Bot, ChatSettings, attributed_messages, chat_settings,
     get_bot, init_bot_schema, list_bots, model_for_turn,
     resolve_target, save_bot, set_bot_active, set_chat_settings,
+    delete_conversation,
 )
+from colibri.milo_core.specialist_presets import ensure_specialists
 from colibri.milo_core.updates import (
     CURRENT_VERSION, UpdateError, latest_milo_release,
     release_version, installer_asset, newer, download_verified,
@@ -204,6 +206,7 @@ class MiloDesktop:
         self.config["model_directory"] = str(self.models_root)
         self.db = LocalMemoryStore(DB_PATH)
         init_bot_schema(self.db.db)
+        ensure_specialists(self.db.db, self.models_root)
         init_documents(self.db.db)
         init_web_prefs(self.db.db)
         DOCUMENTS.mkdir(parents=True, exist_ok=True)
@@ -252,7 +255,8 @@ class MiloDesktop:
         tk.Label(self.side, text="DIRECT MESSAGES", bg=SIDEBAR, fg=MUTED,
                  font=(FONT, 9, "bold")).pack(anchor="w", padx=17, pady=(9, 7))
         self.chat_list = ConversationList(
-            self.side, self._select_chat, background=SIDEBAR)
+            self.side, self._select_chat, on_delete=self.delete_chat,
+            background=SIDEBAR)
         self.chat_list.pack(fill="both", expand=True, padx=(5, 5))
 
         # Chat and conversations stay visible; the setup/admin tools don't
@@ -975,6 +979,7 @@ class MiloDesktop:
                 author_id=author_id if role == "assistant" else None,
                 author_name=author_name if role == "assistant" else None,
                 avatar=(AVATARS / avatar if avatar else None))
+        self.chat_view.show_latest()
 
     def _refresh_chat_list(self):
         self.chats = []
@@ -1011,6 +1016,43 @@ class MiloDesktop:
             self._load_chat()
             self._refresh_chat_context()
             self._ensure_chat_model()
+
+    def delete_chat(self, chat_id):
+        """Explicit destructive action only; don't touch historical archives."""
+        if self.busy or self.engine_starting:
+            messagebox.showinfo(
+                "Delete chat", "Finish the active message or model change first.")
+            return
+        title = next((name for ident, name in self.chats if ident == chat_id),
+                     "this conversation")
+        if not messagebox.askyesno(
+            "Delete conversation",
+            "Permanently delete the conversation:\n\n" + title +
+            "\n\nIts messages cannot be restored unless you have a backup. "
+            "Your original Milo history, approved memories and other chats "
+            "will remain untouched."):
+            return
+        try:
+            delete_conversation(self.db.db, chat_id)
+            if self.current_chat == chat_id:
+                remaining = self.db.db.execute(
+                    "SELECT chat_id FROM conversations GROUP BY chat_id "
+                    "ORDER BY MAX(id) DESC LIMIT 1").fetchone()
+                if remaining:
+                    self.current_chat = remaining[0]
+                else:
+                    self.current_chat = uuid.uuid4().hex
+                    set_chat_settings(
+                        self.db.db,
+                        ChatSettings(self.current_chat, "room", "milo", ""))
+                self.config["current_chat"] = self.current_chat
+                save_config(self.config)
+            self._refresh_chat_list()
+            self._load_chat()
+            self._refresh_chat_context()
+            self._ensure_chat_model()
+        except (ValueError, sqlite3.Error) as exc:
+            messagebox.showerror("Delete conversation", str(exc)[:260])
 
     def copy_conversation(self):
         """Copy complete transcript with author attribution, without a model call."""
