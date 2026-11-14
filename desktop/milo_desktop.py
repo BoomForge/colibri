@@ -39,8 +39,9 @@ from colibri.milo_core.windows_actions import (
 )
 from colibri.milo_core.pc_broker import (
     PCActionError, PCPlan, parse_pc_request, prepare_pc_plan,
-    execute_pc_plan, load_apps, register_app, remove_app,
+    plan_discovered_launch, execute_pc_plan, load_apps, register_app, remove_app,
 )
+from colibri.milo_core.app_discovery import find_installed_apps, AppMatch
 from colibri.milo_core.global_hotkey import GlobalQuickChatHotkey
 from colibri.milo_core.tool_activity import (
     init_activity, record_activity, list_activity, clear_activity,
@@ -1591,7 +1592,8 @@ class MiloDesktop:
             "  rename \"old.txt\" to \"new.txt\" in downloads\n"
             "  move files containing \"sprite\" from downloads to documents\n"
             "  create note \"ideas.txt\" in documents with text \"First idea\"\n"
-            "Registered apps: add a local .exe below, then say 'open blender'.\n"
+            "Just say 'open Blender' or 'open OBS'. Milo looks for the .exe.\n"
+            "Apps in nonstandard folders can still be registered below.\n"
             "File changes, application launches, window focus and typing always "
             "require approval. No administrator or arbitrary script execution."
         )
@@ -1694,12 +1696,130 @@ class MiloDesktop:
         self.root.wait_window(window)
         return result["approved"]
 
+    def _choose_installed_app(self, name: str, found: list[AppMatch]):
+        """Choose exact file when multiple apps match; never silently guess."""
+        if len(found) == 1:
+            return found[0]
+        window = tk.Toplevel(self.root)
+        window.title("Milo · Choose installed application")
+        window.geometry("780x415")
+        window.minsize(560, 330)
+        window.configure(bg=PANEL)
+        window.transient(self.root)
+        tk.Label(
+            window, text="Several installed applications match '"+name+"'.",
+            bg=PANEL, fg=FG, font=(FONT, 11, "bold")).pack(
+                fill="x", padx=20, pady=(16, 5))
+        tk.Label(
+            window, text="Select the EXE you want. Milo will show its full "
+                         "path again before asking permission to launch it.",
+            bg=PANEL, fg=MUTED, font=(FONT, 9), wraplength=720).pack(
+                fill="x", padx=20, pady=(0, 10))
+        holder = tk.Frame(window, bg=PANEL)
+        holder.pack(fill="both", expand=True, padx=18, pady=(0, 10))
+        scroll = tk.Scrollbar(holder)
+        scroll.pack(side="right", fill="y")
+        listing = tk.Listbox(
+            holder, bg=BG, fg=FG, selectbackground=EDGE,
+            font=(FONT, 9), activestyle="none", exportselection=False,
+            yscrollcommand=scroll.set)
+        listing.pack(fill="both", expand=True)
+        scroll.configure(command=listing.yview)
+        for match in found:
+            listing.insert(
+                "end", match.path.name+"  ·  "+str(match.path))
+        result = {"item": None}
+        def select(_event=None):
+            picked = listing.curselection()
+            if picked:
+                result["item"] = found[picked[0]]
+                window.destroy()
+        def cancel():
+            window.destroy()
+        control = tk.Frame(window, bg=PANEL)
+        control.pack(fill="x", padx=18, pady=(0, 15))
+        new_button(control, "Cancel", cancel).pack(side="left")
+        new_button(control, "Use selected executable", select,
+                   primary=True).pack(side="right")
+        listing.bind("<Double-Button-1>", select)
+        window.protocol("WM_DELETE_WINDOW", cancel)
+        window.grab_set()
+        listing.focus_set()
+        self.root.wait_window(window)
+        return result["item"]
+
+    def _discover_pc_app(self, plan: PCPlan, chat_context):
+        """Run Windows installed-app enumeration off the Tk interface thread."""
+        chat_id, prompt, target_id, author_name, avatar, shared = chat_context
+        self._begin_tool_turn(chat_id, prompt, target_id, author_name, avatar)
+        self._audit("pc_app_search", "started")
+        def worker():
+            try:
+                found = find_installed_apps(plan.args[0])
+                self.events.put(("pc_app_search_result", plan, chat_context, found, ""))
+            except (OSError, ValueError, PCActionError) as exc:
+                self.events.put((
+                    "pc_app_search_result", plan, chat_context, [],
+                    str(exc)[:240]))
+        threading.Thread(
+            target=worker, name="milo-app-discovery",
+            daemon=True).start()
+
+    def _complete_pc_app_search(self, plan: PCPlan, chat_context, found, error):
+        """Only this Tk-thread callback may show the chooser and approval UI."""
+        chat_id, prompt, target_id, author_name, avatar, shared = chat_context
+        if self.cancel.is_set():
+            self._audit("pc_app_search", "cancelled")
+            reply = "Application search cancelled."
+        elif error:
+            self._audit("pc_app_search", "failed")
+            reply = "I couldn't search installed applications: "+error
+        elif not found:
+            self._audit("pc_app_search", "completed")
+            reply = (
+                "I couldn't find an installed executable for '"+plan.args[0]+
+                "' in Windows App Paths, installed-app registrations or common "
+                "program folders. If it is installed in another drive or "
+                "Steam library, use Setup & modules → PC control → "
+                "Add local application as a fallback.")
+        else:
+            self._audit("pc_app_search", "completed")
+            match = self._choose_installed_app(plan.args[0], found)
+            if match is None:
+                self._audit("pc_launch_discovered_app", "denied")
+                reply = "I found matching installed programs, but no executable was selected."
+            else:
+                try:
+                    candidate = plan_discovered_launch(plan.args[0], match)
+                except (OSError, ValueError, PCActionError) as exc:
+                    self._audit("pc_launch_discovered_app", "failed")
+                    reply = "The discovered program changed: "+str(exc)[:230]
+                else:
+                    if not self._approve_pc_plan(candidate):
+                        self._audit("pc_launch_discovered_app", "denied")
+                        reply = "Application launch cancelled. Nothing was opened."
+                    else:
+                        self._audit("pc_launch_discovered_app", "approved")
+                        try:
+                            reply = execute_pc_plan(candidate, approved=True)
+                            self._audit("pc_launch_discovered_app", "completed")
+                        except (OSError, ValueError, PermissionError,
+                                PCActionError) as exc:
+                            self._audit("pc_launch_discovered_app", "failed")
+                            reply = "I couldn't launch that application: "+str(exc)[:240]
+        self.events.put((
+            "windows_action_result", chat_id, prompt, reply,
+            target_id, author_name, "", shared))
+
     def _perform_pc_plan(self, plan: PCPlan, *, chat_context):
         """Separate model-independent action preview and owner confirmation."""
         if self.busy:
             messagebox.showinfo(
                 "Milo is responding", "Finish the current response first.",
                 parent=self.root)
+            return
+        if plan.kind == "discover_app":
+            self._discover_pc_app(plan, chat_context)
             return
         try:
             plan = prepare_pc_plan(plan)
@@ -2531,6 +2651,9 @@ class MiloDesktop:
                     self.check_connection()
                 elif kind == "model_import_error":
                     messagebox.showerror("Model import", event[1])
+                elif kind == "pc_app_search_result":
+                    self._complete_pc_app_search(
+                        event[1], event[2], event[3], event[4])
                 elif kind == "windows_action_result":
                     chat_id, prompt, reply = event[1:4]
                     self._save_direct_turn(
