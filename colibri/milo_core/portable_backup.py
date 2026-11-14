@@ -31,7 +31,7 @@ CHUNK = 1024 * 1024
 SCHEMA_VERSION = 1
 COMPONENTS = frozenset({
     "settings", "profiles", "avatars", "attachments", "models", "runtime",
-    "plugins", "archives",
+    "plugins", "archives", "documents",
 })
 MAX_FILES = 100000
 MAX_UNCOMPRESSED_BYTES = 1 << 43  # 8 TiB; includes very large local model files.
