@@ -1098,9 +1098,12 @@ class MiloDesktop:
             "FROM conversations c LEFT JOIN chat_settings s ON c.chat_id=s.chat_id "
             "GROUP BY c.chat_id ORDER BY MAX(c.id) DESC LIMIT 100"
         ).fetchall()
+        chat_avatars = {}
         for chat_id, title, kind, bot_id in rows:
             if kind == "private":
                 bot = get_bot(self.db.db, bot_id) if bot_id != "milo" else None
+                if bot:
+                    chat_avatars[chat_id] = self._bot_avatar_path(bot)
                 title = "@" + public_handle(bot_id) + " · " + title
             else:
                 title = "# " + title
@@ -1110,7 +1113,12 @@ class MiloDesktop:
             title = ("DM @" + public_handle(context.bot_id) if context.kind == "private"
                      else "# New conversation")
             self.chats.insert(0, (self.current_chat, title))
-        self.chat_list.set_chats(self.chats, self.current_chat)
+            if context.kind == "private" and context.bot_id != "milo":
+                bot = get_bot(self.db.db, context.bot_id)
+                if bot:
+                    chat_avatars[self.current_chat] = self._bot_avatar_path(bot)
+        self.chat_list.set_chats(
+            self.chats, self.current_chat, avatar_by_chat=chat_avatars)
 
     def _select_chat(self, selected):
         if self.busy:
