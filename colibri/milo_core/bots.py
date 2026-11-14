@@ -17,6 +17,20 @@ _SLUG = re.compile(r"^[a-z][a-z0-9_-]{1,30}$")
 _AVATAR = re.compile(r"^[a-f0-9]{32}\.(?:png|jpg|jpeg|webp|gif)$")
 _MAX_BOTS = 48
 
+# Public handles can change without breaking saved chat_settings, bot_web_permissions,
+# documents, provenance or owner model choices keyed to these original internal IDs.
+SPECIALIST_HANDLES = {
+    "research": "sage",
+    "webdev": "nova",
+    "gamedev": "forge",
+}
+SPECIALIST_IDS = {handle: key for key, handle in SPECIALIST_HANDLES.items()}
+
+
+def public_handle(bot_id: str) -> str:
+    return SPECIALIST_HANDLES.get(bot_id, bot_id)
+
+
 
 @dataclass(frozen=True)
 class Bot:
@@ -189,14 +203,15 @@ def resolve_target(db: sqlite3.Connection, prompt: str,
     match = _MENTION.search(prompt)
     if not match:
         return "milo", prompt
-    handle = match.group(1).lower()
+    requested_handle = match.group(1).lower()
+    handle = SPECIALIST_IDS.get(requested_handle, requested_handle)
     if handle == "milo":
         stripped = (prompt[:match.start()] + prompt[match.end():]).strip(" \\t,:")
         return "milo", stripped or prompt
     bot = get_bot(db, handle)
     if bot is None or not bot.active:
         raise ValueError(
-            f"@{handle} does not match an enabled bot. Add or enable it in the right panel.")
+            f"@{requested_handle} does not match an enabled bot. Add or enable it in the right panel.")
     remainder = (prompt[:match.start()] + prompt[match.end():]).strip(" \t,:")
     if not remainder.strip():
         raise ValueError("Add a message after the @bot handle")
@@ -281,7 +296,7 @@ def recent_for_bot(db: sqlite3.Connection, chat_id: str, *, limit: int = 12):
         return []
     return [
         {"role": role,
-         "content": (f"[Reply by @{author_id} ({author_name})]\n{content}"
+         "content": (f"[Reply by @{public_handle(author_id)} ({author_name})]\n{content}"
                      if role == "assistant" and author_id != "milo" else content)}
         for role, content, _date, author_id, author_name, _avatar
         in attributed_messages(db, chat_id, limit=limit)
