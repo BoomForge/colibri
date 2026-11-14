@@ -109,7 +109,7 @@ class MiloConversation:
                 "into a matching non-sensitive window, renaming a named file "
                 "without overwrite, and creating a bounded .txt/.md note. "
                 "Example syntax: open notepad; open downloads; list open windows; "
-                "switch to Notepad; rename \\"old.txt\\" to \\"new.txt\\" in downloads. "
+                'switch to Notepad; rename "old.txt" to "new.txt" in downloads. '
                 "You cannot execute arbitrary shell commands, click around "
                 "webpages, read sensitive directories, use the webcam/microphone, "
                 "send email, or control desktop apps autonomously. NEVER claim "
