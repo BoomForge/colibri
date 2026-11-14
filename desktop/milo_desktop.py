@@ -1570,6 +1570,28 @@ def self_test() -> int:
     return 0
 
 
+def ui_self_test() -> int:
+    """Windows-only, no model: construct key panels and shut down cleanly."""
+    root = tk.Tk()
+    root.withdraw()
+    app = MiloDesktop(root)
+    try:
+        assert not app.advanced_open, "setup should begin collapsed"
+        app.toggle_advanced()
+        assert app.advanced_open
+        app.toggle_advanced()
+        models_panel = app.models_window()
+        updates_panel = app.updates_modules_window()
+        root.update_idletasks()
+        root.update()
+        for child in list(root.winfo_children()):
+            if isinstance(child, tk.Toplevel):
+                child.destroy()
+    finally:
+        app._close()
+    return 0
+
+
 def embedded_self_test() -> int:
     """Verify the built package includes the first-party Colibri gateway and engines."""
     runtime = install_root() / "Runtime"
@@ -1598,6 +1620,8 @@ def main() -> int:
         from desktop.colibri_service import run_service
         args = sys.argv[sys.argv.index("--colibri-service") + 1:]
         return run_service(args)
+    if "--ui-self-test" in sys.argv:
+        return ui_self_test()
     if "--embedded-self-test" in sys.argv:
         return embedded_self_test()
     if "--self-test" in sys.argv:
