@@ -1,4 +1,4 @@
-name: Milo 0.9.3 Windows Installer Preview
+name: Milo 0.9.4 Windows Installer Preview
 
 on:
   push:
@@ -146,11 +146,11 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "NSIS install failed" }
           }
           & $compiler /V3 "desktop/install/Milo.nsi"
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path "Milo-Setup-0.9.3.exe")) { throw "NSIS build failed" }
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path "Milo-Setup-0.9.4.exe")) { throw "NSIS build failed" }
       - name: Test real installer and upgrade preserving models
         shell: pwsh
         run: |
-          $exe = (Resolve-Path "Milo-Setup-0.9.3.exe").Path
+          $exe = (Resolve-Path "Milo-Setup-0.9.4.exe").Path
           $first = Start-Process -FilePath $exe -ArgumentList "/S" -Wait -PassThru
           if ($first.ExitCode -ne 0) { throw "Installer returned $($first.ExitCode)" }
           $installed = Join-Path $env:LOCALAPPDATA "Programs/Milo"
@@ -166,6 +166,36 @@ jobs:
           Set-Content $modelTest "Leave my checkpoints in place" -Encoding UTF8
           $second = Start-Process -FilePath $exe -ArgumentList "/S" -Wait -PassThru
           if ($second.ExitCode -ne 0 -or !(Test-Path $modelTest)) { throw "Model data lost after upgrade" }
+          # Silent installations used by CI must not relaunch the desktop GUI.
+          if (Get-Process Milo -ErrorAction SilentlyContinue) {
+            throw "Silent setup unexpectedly started Milo.exe"
+          }
+          # Model the PID-aware updater handoff without any private app data.
+          $held = Start-Process -FilePath "powershell.exe" -ArgumentList @(
+            "-NoProfile", "-NonInteractive", "-Command",
+            "Start-Sleep -Seconds 5") -PassThru
+          try {
+            $clock = [System.Diagnostics.Stopwatch]::StartNew()
+            $pidInstaller = Start-Process -FilePath $exe -ArgumentList @(
+              "/S", "/WAITFORPID=$($held.Id)") -Wait -PassThru
+            $clock.Stop()
+            if ($pidInstaller.ExitCode -ne 0) {
+              throw "PID-aware reinstall failed"
+            }
+            if ($clock.Elapsed.TotalSeconds -lt 2.5) {
+              throw "Installer did not wait for previous process exit"
+            }
+            if (!(Test-Path $modelTest)) {
+              throw "PID-aware reinstall did not preserve Models"
+            }
+            if (Get-Process Milo -ErrorAction SilentlyContinue) {
+              throw "PID-aware silent setup unexpectedly relaunched Milo"
+            }
+          } finally {
+            if (!$held.HasExited) {
+              Stop-Process -Id $held.Id -Force -ErrorAction SilentlyContinue
+            }
+          }
           foreach ($arg in @("--embedded-self-test", "--ui-self-test")) {
             Write-Host "Testing installed Milo $arg"
             $p = Start-Process -FilePath $installedExe -ArgumentList $arg -PassThru
@@ -194,9 +224,9 @@ jobs:
       - name: Upload actual installer and independently updateable feature package
         uses: actions/upload-artifact@v4
         with:
-          name: Milo-Installer-0.9.3-Preview
+          name: Milo-Installer-0.9.4-Preview
           path: |
-            Milo-Setup-0.9.3.exe
+            Milo-Setup-0.9.4.exe
             milo-module-system_info-0.1.0.zip
             milo-modules.json
           retention-days: 30
@@ -211,14 +241,14 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tip)) { throw "Cannot verify branch" }
           $tipSha = ($tip -split '\s+')[0].ToLowerInvariant()
           if ($tipSha -ne $env:GITHUB_SHA.ToLowerInvariant()) { Write-Host "Stale build; skip publication"; exit 0 }
-          gh release view milo-v0.9.3 --repo BoomForge/colibri 2>$null | Out-Null
+          gh release view milo-v0.9.4 --repo BoomForge/colibri 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) { Write-Host "Release already exists; leaving it unchanged"; exit 0 }
-          $exe = "Milo-Setup-0.9.3.exe"
+          $exe = "Milo-Setup-0.9.4.exe"
           if (!(Test-Path $exe)) { throw "Verified installer missing" }
           $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
-          "$hash  $exe" | Set-Content Milo-0.9.3-SHA256.txt -Encoding ascii
-          $notes = "Milo 0.9.3 Windows preview: closes/minimises to Windows system tray while keeping local model and chats running. Right-click the tray icon and select Close Milo to exit; Open Milo or left-click restores. Retains anime Sage/Nova/Forge with @mentions, global quick chat, approved screenshot/vision and conversation deletion fixes. Local memory and models preserved. Unsigned prerelease; verify SHA-256, back up local Milo data and Models. Installer SHA-256: $hash. Commit: $env:GITHUB_SHA."
-          gh release create milo-v0.9.3 $exe milo-modules.json milo-module-system_info-0.1.0.zip Milo-0.9.3-SHA256.txt --repo BoomForge/colibri --target "$env:GITHUB_SHA" --prerelease --title "Milo 0.9.3 Windows Preview" --notes $notes
+          "$hash  $exe" | Set-Content Milo-0.9.4-SHA256.txt -Encoding ascii
+          $notes = "Milo 0.9.4 Windows preview: automatically relaunches Milo after interactive installation and in-app updates. The installer waits for the old Milo PID to exit before replacing files. Silent installs never auto-launch. Keeps close-to-tray, Sage/Nova/Forge @mentions, approved vision, conversation deletion fixes, and local model and memory preservation. Unsigned prerelease; verify SHA-256, back up local Milo data and Models. Installer SHA-256: $hash. Commit: $env:GITHUB_SHA."
+          gh release create milo-v0.9.4 $exe milo-modules.json milo-module-system_info-0.1.0.zip Milo-0.9.4-SHA256.txt --repo BoomForge/colibri --target "$env:GITHUB_SHA" --prerelease --title "Milo 0.9.4 Windows Preview" --notes $notes
           if ($LASTEXITCODE -ne 0) { throw "Release upload failed" }
-          gh release view milo-v0.9.3 --repo BoomForge/colibri --json tagName,assets,isDraft,isPrerelease
+          gh release view milo-v0.9.4 --repo BoomForge/colibri --json tagName,assets,isDraft,isPrerelease
           if ($LASTEXITCODE -ne 0) { throw "Cannot confirm release" }
