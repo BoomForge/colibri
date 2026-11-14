@@ -241,6 +241,22 @@ def append_attributed_turn(db: sqlite3.Connection, chat_id: str,
         )
 
 
+def delete_conversation(db: sqlite3.Connection, chat_id: str) -> int:
+    """Delete just the chosen new-chat thread and its bot attribution metadata.
+
+    Never touch imported historical archives, approved notes, bot profiles,
+    other chats, or local model weights. Foreign-key cascades attribution.
+    """
+    if not isinstance(chat_id, str) or not 1 <= len(chat_id) <= 128:
+        raise ValueError("invalid conversation ID")
+    init_bot_schema(db)
+    with db:
+        rows = db.execute(
+            "DELETE FROM conversations WHERE chat_id=?", (chat_id,)).rowcount
+        db.execute("DELETE FROM chat_settings WHERE chat_id=?", (chat_id,))
+    return rows
+
+
 def attributed_messages(db: sqlite3.Connection, chat_id: str, *,
                         limit: int = 1000):
     if not isinstance(chat_id, str) or not 1 <= len(chat_id) <= 128:
