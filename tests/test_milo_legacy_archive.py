@@ -148,6 +148,15 @@ class MiloLegacyTests(unittest.TestCase):
             with self.assertRaises(LegacyArchiveError):
                 inspect_legacy_archive(path)
 
+    def test_different_assistant_identity_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "not-milo.json"
+            data = records()
+            data[1]["authorName"] = "Nyx"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaises(LegacyArchiveError):
+                inspect_legacy_archive(path)
+
     def test_existing_persona_requires_separate_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
