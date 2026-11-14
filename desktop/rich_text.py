@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import webbrowser
 import tkinter as tk
 from tkinter import font as tkfont
 
@@ -16,6 +17,8 @@ CODE_BG = "#20222c"
 CODE_HEADER = "#292b36"
 ACCENT = "#ad92ff"
 SELECTION = "#4c4279"
+LINK = "#93b9ff"
+_URLS = re.compile(r"https://[^\s<>'\"()\[\]]+")
 
 
 @dataclass(frozen=True)
@@ -72,8 +75,33 @@ def visual_rows(content: str, width: int, font: tkfont.Font,
 
 
 def _copy(widget, value: str):
+    """Copy into the Windows clipboard instead of only highlighting text."""
     widget.clipboard_clear()
     widget.clipboard_append(value)
+    widget.update_idletasks()
+
+
+def selected_text(widget: tk.Text) -> str:
+    try:
+        return widget.get("sel.first", "sel.last")
+    except tk.TclError:
+        return ""
+
+
+def copy_selection(widget: tk.Text):
+    selected = selected_text(widget)
+    if selected:
+        _copy(widget, selected)
+    return "break"
+
+
+def find_https_links(text: str):
+    """Safe link annotation only; generated text never executes as markup."""
+    for match in _URLS.finditer(text):
+        url = match.group(0).rstrip(".,;:!?)}]")
+        if url.startswith("https://") and len(url) <= 1700:
+            yield match.start(), match.start() + len(url), url
+
 
 
 class RichMessage(tk.Frame):
@@ -95,10 +123,7 @@ class RichMessage(tk.Frame):
     def _context(self, event, widget, block):
         menu = tk.Menu(self, tearoff=False, bg=CODE_HEADER, fg=TEXT,
                        activebackground=SELECTION)
-        try:
-            selected = widget.get("sel.first", "sel.last")
-        except tk.TclError:
-            selected = ""
+        selected = selected_text(widget)
         if selected:
             menu.add_command(label="Copy selection",
                              command=lambda: _copy(self, selected))
@@ -132,6 +157,22 @@ class RichMessage(tk.Frame):
                     lambda e, w=widget, s=text: self._context(e, w, s))
         widget.bind("<Control-a>",
                     lambda e, w=widget: self._select_all(w))
+        widget.bind("<Control-c>",
+                    lambda e, w=widget: copy_selection(w))
+        widget.bind("<Control-Insert>",
+                    lambda e, w=widget: copy_selection(w))
+        if not mono:
+            for n, (start, end, url) in enumerate(find_https_links(text)):
+                tag = "url_" + str(n)
+                widget.tag_add(tag, f"1.0+{start}c", f"1.0+{end}c")
+                widget.tag_configure(tag, foreground=LINK, underline=True)
+                widget.tag_bind(
+                    tag, "<Button-1>",
+                    lambda e, address=url: webbrowser.open(address, new=2))
+                widget.tag_bind(tag, "<Enter>",
+                                lambda e, w=widget: w.configure(cursor="hand2"))
+                widget.tag_bind(tag, "<Leave>",
+                                lambda e, w=widget: w.configure(cursor="xterm"))
         self.copy_widgets.append(widget)
         return widget
 
