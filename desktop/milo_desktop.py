@@ -30,6 +30,7 @@ from colibri.milo_core.filesystem import find_files_by_prefix
 from colibri.milo_core.local_engine import (
     LocalEngine, EngineStartupError, chosen_model, discover_models,
     install_root, managed_models_root, model_valid,
+    discover_loose_gguf, gguf_target,
 )
 from colibri.milo_core.legacy_archive import (
     LegacyArchiveError, import_legacy_archive, inspect_legacy_archive,
@@ -519,6 +520,11 @@ class MiloDesktop:
                     messagebox.showerror(
                         "Colibri startup",
                         event[1] + "\n\nSee %LOCALAPPDATA%\\Milo\\logs\\colibri-service.log")
+                elif kind == "gguf_model_ready":
+                    self.config["model_location"] = event[1]
+                    self.config["backend"] = event[2]
+                    save_config(self.config)
+                    self.check_connection()
                 elif kind == "model_imported":
                     relative = event[1]
                     self.config["model_location"] = relative
@@ -623,18 +629,28 @@ class MiloDesktop:
         tk.Label(panel, text="Installed models", bg=PANEL, fg=MUTED).pack(
             anchor="w", padx=24, pady=(15, 4))
         found = discover_models(self.models_root)
+        loose = [
+            item for item in discover_loose_gguf(self.models_root)
+            if not model_valid(gguf_target(self.models_root, item))
+        ]
+        entries = [("ready", x) for x in found] + [("gguf", x) for x in loose]
         items = tk.Listbox(
             panel, bg=BG, fg=FG, font=(FONT, 10), height=9,
             selectbackground=EDGE, activestyle="none", relief="flat")
         items.pack(fill="both", expand=True, padx=24, pady=(0, 7))
-        for index, model in enumerate(found):
+        for index, (kind, model) in enumerate(entries):
             rel = str(model.relative_to(self.models_root))
             marker = "●  " if rel == self.config.get("model_location") else "   "
-            items.insert("end", marker + rel)
+            label = marker + rel
+            if kind == "gguf":
+                label += "   ·   GGUF  [Import metadata]"
+            items.insert("end", label)
             if rel == self.config.get("model_location"):
                 items.selection_set(index)
-        if not found:
-            items.insert("end", "No compatible model folders found yet.")
+        if not entries:
+            items.insert("end", "No model checkpoints found. Add a GGUF or model folder.")
+        elif len(entries) == 1:
+            items.selection_set(0)
 
         backend = tk.StringVar(value=self.config.get("backend", "vulkan"))
         choices = tk.Frame(panel, bg=PANEL)
@@ -654,11 +670,14 @@ class MiloDesktop:
                     parent=panel)
                 return
             indexes = items.curselection()
-            if not indexes or indexes[0] >= len(found):
-                messagebox.showinfo("Milo", "Select a model folder first.",
+            if not indexes or indexes[0] >= len(entries):
+                messagebox.showinfo("Milo", "Select a model first.",
                                     parent=panel)
                 return
-            selected = found[indexes[0]]
+            kind, selected = entries[indexes[0]]
+            if kind == "gguf":
+                self._import_loose_gguf(selected, backend.get(), parent=panel)
+                return
             if not model_valid(selected):
                 messagebox.showerror(
                     "Milo", "This model folder is incomplete.",
@@ -757,7 +776,16 @@ class MiloDesktop:
         actions.pack(fill="x", padx=24, pady=12)
         new_button(actions, "Use selected model", select, primary=True).pack(
             side="left", padx=(0, 8))
-        new_button(actions, "Import existing model", add).pack(side="left")
+        new_button(actions, "Import model folder", add).pack(side="left")
+        def import_gguf_file():
+            selected = filedialog.askopenfilename(
+                title="Choose GGUF checkpoint",
+                filetypes=[("GGUF model weights", "*.gguf")],
+                parent=panel)
+            if selected:
+                self._import_loose_gguf(Path(selected), backend.get(), parent=panel)
+        new_button(actions, "Import GGUF file", import_gguf_file).pack(
+            side="left", padx=(8, 0))
         folder_actions = tk.Frame(panel, bg=PANEL)
         folder_actions.pack(fill="x", padx=24, pady=(0, 14))
         new_button(
@@ -772,6 +800,88 @@ class MiloDesktop:
                (DATA_DIR / "logs" / "colibri-service.log").is_file()
             else messagebox.showinfo("Colibri", "No local engine log yet.", parent=panel),
         ).pack(side="left")
+
+    def _import_loose_gguf(self, source: Path, backend: str, *, parent=None):
+        """Run the bundled Colibri GGUF reader silently, then select model."""
+        if self.busy or self.engine_starting:
+            messagebox.showinfo(
+                "Milo", "Finish the current response or model load first.",
+                parent=parent)
+            return
+        if source.suffix.lower() != ".gguf":
+            messagebox.showerror("Model", "Choose a GGUF file.", parent=parent)
+            return
+        source = source.resolve(strict=True)
+        destination = self.models_root / source.name
+        if not source.is_relative_to(self.models_root.resolve()):
+            if destination.exists():
+                messagebox.showerror(
+                    "Model already exists",
+                    "A file with that name already exists in Models.",
+                    parent=parent)
+                return
+            if not messagebox.askyesno(
+                "Copy GGUF into Models",
+                "Copy the model weight file into your managed Models folder?\n\n"
+                "This may need several gigabytes of free disk space. "
+                "The original file stays unchanged.",
+                parent=parent):
+                return
+        else:
+            destination = source
+        if parent is not None:
+            parent.destroy()
+        self.connection_label.configure(
+            text="Preparing GGUF model  •  " + destination.name, fg=ORANGE)
+        requested_backend = backend
+        def worker():
+            copied = False
+            try:
+                if destination != source:
+                    if source.is_symlink() or not source.is_file():
+                        raise ValueError("model source cannot be a symbolic link")
+                    if shutil.disk_usage(self.models_root).free < (
+                        source.stat().st_size + 512 * 1024 * 1024
+                    ):
+                        raise OSError("not enough disk space to import the model")
+                    pending = destination.with_suffix(destination.suffix + ".incomplete")
+                    if pending.exists():
+                        raise FileExistsError("incomplete model copy already exists")
+                    try:
+                        shutil.copyfile(source, pending)
+                        pending.rename(destination)
+                        copied = True
+                    finally:
+                        pending.unlink(missing_ok=True)
+                import subprocess
+                command = (
+                    [sys.executable] if getattr(sys, "frozen", False)
+                    else [sys.executable, "-m", "desktop.milo_desktop"]
+                )
+                command += ["--gguf-import", str(destination)]
+                logdir = DATA_DIR / "logs"
+                logdir.mkdir(parents=True, exist_ok=True)
+                with (logdir / "gguf-import.log").open("a", encoding="utf-8") as logfile:
+                    child = subprocess.run(
+                        command, cwd=str(self.install_root),
+                        stdout=logfile, stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        timeout=180,
+                    )
+                if child.returncode != 0:
+                    raise RuntimeError(
+                        "Colibri could not import this GGUF. See "
+                        "%LOCALAPPDATA%\\Milo\\logs\\gguf-import.log "
+                        "for unsupported formats or missing metadata.")
+                converted = gguf_target(self.models_root, destination)
+                if not model_valid(converted):
+                    raise RuntimeError("Colibri did not create a loadable model folder")
+                relative = str(converted.relative_to(self.models_root))
+                self.events.put(("gguf_model_ready", relative, requested_backend))
+            except Exception as exc:
+                self.events.put(("model_import_error", str(exc)[:450]))
+        threading.Thread(target=worker, name="milo-gguf-import", daemon=True).start()
 
     def restore_milo_personality(self):
         """Private, approved local import; no GitHub upload or model training."""
@@ -1220,6 +1330,10 @@ def embedded_self_test() -> int:
 
 
 def main() -> int:
+    if "--gguf-import" in sys.argv:
+        from desktop.model_import_service import worker_main
+        args = sys.argv[sys.argv.index("--gguf-import") + 1:]
+        return worker_main(args)
     if "--colibri-service" in sys.argv:
         from desktop.colibri_service import run_service
         args = sys.argv[sys.argv.index("--colibri-service") + 1:]
