@@ -102,7 +102,11 @@ jobs:
               if (Test-Path $trace) { Get-Content $trace | Select-Object -Last 100 | Write-Host }
               throw "Bundled Milo $arg timed out (possible UI deadlock)"
             }
-            if ($p.ExitCode -ne 0) { throw "Milo binary failed $arg with exit $($p.ExitCode)" }
+            if ($p.ExitCode -ne 0) {
+              $trace = Join-Path $env:TEMP "milo-ui-diagnostics.log"
+              if (Test-Path $trace) { Get-Content $trace | Select-Object -Last 100 | Write-Host }
+              throw "Milo binary failed $arg with exit $($p.ExitCode)"
+            }
           }
       - name: Compile actual Windows installer using NSIS
         shell: pwsh
