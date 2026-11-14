@@ -2753,6 +2753,25 @@ def ui_self_test() -> int:
             assert code["body"].copy_widgets, "copyable Tk text widgets missing"
             assert len(code["body"].copy_widgets) >= 2, "code block missing"
             assert app.entry_placeholder, "composer hint missing"
+            from desktop.rich_text import copy_selection
+            reader_window, reader_text = app.chat_view.selectable_view()
+            reader_text.tag_add("sel", "1.0", "1.11")
+            copy_selection(reader_text)
+            assert root.clipboard_get() == reader_text.get("1.0", "1.11"), \
+                "Ctrl+C selection did not reach the system clipboard"
+            mark("after full transcript selection and clipboard")
+            from PIL import Image as PILImage
+            sample = Path(tempfile.gettempdir()) / "milo-ui-preview-smoke.png"
+            try:
+                PILImage.new("RGBA", (36, 28), (40, 50, 80, 255)).save(sample)
+                image_window, image_info = open_preview(root, sample)
+                assert image_info["kind"] == "image"
+                assert image_info["dimensions"] == (36, 28)
+                image_window.destroy()
+            finally:
+                sample.unlink(missing_ok=True)
+            mark("after native image preview")
+            reader_window.destroy()
             mark("before update_idletasks")
             root.update_idletasks()
             mark("before update")
