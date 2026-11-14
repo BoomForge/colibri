@@ -805,11 +805,16 @@ class MiloDesktop:
         self.catalog_list.insert("end", "Check the release catalog to see available modules.")
 
         existing = load_module_state(DATA_DIR).get("installed", {})
-        if existing:
-            tk.Label(panel, text="Installed: " + ", ".join(
-                f"{key} v{val}" for key, val in sorted(existing.items())),
-                bg=PANEL, fg=MUTED, wraplength=580).pack(
-                    anchor="w", padx=24, pady=3)
+        for module_id, version in sorted(existing.items()):
+            flag = tk.BooleanVar(value=module_enabled(DATA_DIR, module_id))
+            tk.Checkbutton(
+                panel, text=f"Enable {module_id}  v{version}",
+                variable=flag,
+                command=lambda key=module_id, v=flag:
+                    set_enabled(DATA_DIR, key, bool(v.get())),
+                bg=PANEL, fg=FG, selectcolor=BG,
+                activebackground=PANEL, activeforeground=FG,
+                font=(FONT, 9)).pack(anchor="w", padx=24, pady=1)
         catalog_buttons = tk.Frame(panel, bg=PANEL)
         catalog_buttons.pack(fill="x", padx=24, pady=(5, 16))
         def find_modules():
