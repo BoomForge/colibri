@@ -2938,7 +2938,7 @@ def ui_self_test() -> int:
             report.flush()
         faulthandler.dump_traceback_later(12, repeat=False, file=report)
         mark("before tk.Tk")
-        root = tk.Tk()
+        root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
         root.withdraw()
         mark("before MiloDesktop")
         app = MiloDesktop(root)
@@ -2956,6 +2956,12 @@ def ui_self_test() -> int:
             app._edit_bot_window()  # create-bot editor must open
             app.documents_window("core")  # local Core Knowledge panel must open
             assert app.core_docs_button.winfo_exists(), "Core Knowledge button missing"
+            assert app.attachment_status.winfo_exists(), "Attachment UI missing"
+            if TkinterDnD is not None:
+                assert app.drop_ready, "Native file drag and drop is not active"
+            assert get_bot(app.db.db, "research") is not None
+            assert get_bot(app.db.db, "webdev") is not None
+            assert get_bot(app.db.db, "gamedev") is not None
             mark("after tool windows, bot editor and documents")
             app.chat_view.clear()
             mark("after clear")
@@ -2986,6 +2992,10 @@ def ui_self_test() -> int:
             assert app.model_option_map, "per-chat model mapping missing"
             assert code["body"].copy_widgets, "copyable Tk text widgets missing"
             assert len(code["body"].copy_widgets) >= 2, "code block missing"
+            app.chat_view.show_latest()
+            root.update_idletasks()
+            app.chat_view._finish_reload_scroll(app.chat_view._load_scroll_revision)
+            assert app.chat_view.canvas.yview()[1] >= 0.9, "chat should open at latest turn"
             assert app.entry_placeholder, "composer hint missing"
             from desktop.rich_text import copy_selection
             reader_window, reader_text = app.chat_view.selectable_view()
