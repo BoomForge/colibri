@@ -3804,6 +3804,24 @@ def ui_self_test() -> int:
             assert app.advanced_open
             app.toggle_advanced()
             mark("after sidebar")
+            # Never hide the app unless a healthy system tray can restore it.
+            # Fake readiness tests Tk's actual withdraw/deiconify lifecycle
+            # without running a shell tray host in CI.
+            root.deiconify()
+            root.update_idletasks()
+            app.tray._ready.set()
+            app._hide_to_tray()
+            assert root.state() == "withdrawn", (
+                "Close/minimise must hide Milo, not destroy it")
+            assert not app._exiting and app.db.db is not None, (
+                "Minimisation unexpectedly shut down Milo's database")
+            app._restore_from_tray()
+            assert root.state() in ("normal", "zoomed"), (
+                "Open Milo from tray did not restore the desktop")
+            app.tray._ready.clear()
+            assert root.protocol("WM_DELETE_WINDOW"), (
+                "Close button must have a non-destructive tray handler")
+            mark("after minimize-to-tray and restore")
             # The real images must load from bundled installation paths,
             # not just exist as placeholder names in the database.
             from PIL import Image as PillowImage
