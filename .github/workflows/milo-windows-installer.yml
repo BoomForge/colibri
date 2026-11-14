@@ -12,7 +12,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: milo-windows-installer-${{ github.ref }}
+  # Bind a run to its source commit. Delayed push events for older commits
+  # must not cancel a passing installer build of the current branch head.
+  group: milo-windows-installer-${{ github.sha }}
   cancel-in-progress: true
 
 permissions:
