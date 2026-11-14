@@ -23,6 +23,7 @@ import uuid
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from desktop.chat_view import ChatView, ConversationList, COLORS
 
 from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
@@ -51,16 +52,16 @@ from colibri.milo_core.modules import (
 )
 
 VERSION = CURRENT_VERSION
-BG = "#11131e"
-SIDEBAR = "#171a29"
-PANEL = "#1c2030"
-PANEL_BRIGHT = "#252a3d"
-FG = "#f3f0fc"
-MUTED = "#a5a6b8"
-VIOLET = "#b29aff"
-ORANGE = "#ffbb85"
-ACCENT = "#6653b9"
-EDGE = "#3e345f"
+BG = COLORS["background"]
+SIDEBAR = COLORS["sidebar"]
+PANEL = COLORS["header"]
+PANEL_BRIGHT = "#2c2d38"
+FG = COLORS["text"]
+MUTED = COLORS["muted"]
+VIOLET = COLORS["milo"]
+ORANGE = COLORS["user"]
+ACCENT = "#6753b4"
+EDGE = COLORS["border"]
 FONT = "Segoe UI"
 
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share") / "Milo"
@@ -186,49 +187,50 @@ class MiloDesktop:
         self.module_catalog = []
         self.plugin_actions, self.plugin_errors = load_module_actions(DATA_DIR)
         self.current_chat = self.config.get("current_chat") or "main"
+        self.pending_message = None
         self._build()
+        self._refresh_profile()
         self._refresh_chat_list()
         self._load_chat()
-        self._refresh_profile()
         self._autoselect_local_model()
         self.check_connection()
         self.root.after(70, self._pump)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
     def _build(self):
-        self.side = tk.Frame(self.root, bg=SIDEBAR, width=255,
+        self.side = tk.Frame(self.root, bg=SIDEBAR, width=260,
                              highlightbackground=EDGE, highlightthickness=1)
         self.side.pack(side="left", fill="y")
         self.side.pack_propagate(False)
 
         logo = tk.Frame(self.side, bg=SIDEBAR)
-        logo.pack(fill="x", padx=16, pady=(22, 16))
+        logo.pack(fill="x", padx=18, pady=(17, 14))
         tk.Label(logo, text="M I L O", bg=SIDEBAR, fg=VIOLET,
                  font=(FONT, 22, "bold")).pack(anchor="w")
         tk.Label(logo, text="LOCAL  /  PERSONAL  /  PRIVATE", bg=SIDEBAR,
                  fg=MUTED, font=(FONT, 8)).pack(anchor="w")
         tk.Frame(self.side, bg=EDGE, height=1).pack(fill="x", padx=15)
 
-        new_button(self.side, "＋  New conversation", self.new_chat, primary=True).pack(
-            fill="x", padx=14, pady=(17, 10))
+        new_button(self.side, "＋   New conversation", self.new_chat, primary=True).pack(
+            fill="x", padx=12, pady=(14, 9))
         tk.Label(self.side, text="DIRECT MESSAGES", bg=SIDEBAR, fg=MUTED,
                  font=(FONT, 9, "bold")).pack(anchor="w", padx=17, pady=(9, 7))
-        self.chat_list = tk.Listbox(self.side, bg=SIDEBAR, fg=FG,
-                                    selectbackground=EDGE, selectforeground=FG,
-                                    relief="flat", borderwidth=0, highlightthickness=0,
-                                    activestyle="none", font=(FONT, 10),
-                                    exportselection=False)
-        self.chat_list.pack(fill="both", expand=True, padx=12)
-        self.chat_list.bind("<<ListboxSelect>>", self._select_chat)
+        self.chat_list = ConversationList(
+            self.side, self._select_chat, background=SIDEBAR)
+        self.chat_list.pack(fill="both", expand=True, padx=(5, 5))
 
         # Chat and conversations stay visible; the setup/admin tools don't
         # compete for attention. Their original functionality remains intact.
         self.advanced_open = False
         self.advanced_wrap = tk.Frame(self.side, bg=SIDEBAR)
-        self.advanced_wrap.pack(fill="x", padx=12, pady=(7, 11))
+        self.advanced_wrap.pack(fill="x", padx=12, pady=(7, 8))
         self.advanced_toggle = new_button(
             self.advanced_wrap, "⚙  Setup & modules  ▸",
             self.toggle_advanced)
+        self.advanced_toggle.configure(
+            bg=SIDEBAR, fg=MUTED, anchor="w",
+            activebackground=COLORS["hover"], padx=9, pady=7,
+            font=(FONT, 9))
         self.advanced_toggle.pack(fill="x")
         self.advanced_controls = tk.Frame(self.advanced_wrap, bg=SIDEBAR)
         actions = [
@@ -244,14 +246,21 @@ class MiloDesktop:
         for caption, action, feature in actions:
             if feature is not None and not module_enabled(DATA_DIR, feature):
                 continue
-            new_button(self.advanced_controls, caption, action).pack(
-                fill="x", pady=2)
+            control = new_button(self.advanced_controls, caption, action)
+            control.configure(
+                bg=SIDEBAR, fg=MUTED, anchor="w",
+                activebackground=COLORS["hover"], padx=15, pady=5,
+                font=(FONT, 9))
+            control.pack(fill="x", pady=1)
         for plugin_action in self.plugin_actions:
-            new_button(self.advanced_controls, plugin_action.label,
-                       plugin_action.open_panel).pack(fill="x", pady=2)
+            extra = new_button(self.advanced_controls, plugin_action.label,
+                               plugin_action.open_panel)
+            extra.configure(bg=SIDEBAR, fg=MUTED, anchor="w",
+                            padx=15, pady=5, font=(FONT, 9))
+            extra.pack(fill="x", pady=1)
 
         self.profile_row = tk.Frame(self.side, bg=PANEL)
-        self.profile_row.pack(fill="x", side="bottom", padx=12, pady=(6, 13))
+        self.profile_row.pack(fill="x", side="bottom", padx=10, pady=(7, 9))
         self.user_icon = tk.Label(self.profile_row, text="U", bg=EDGE, fg=ORANGE,
                                   font=(FONT, 14, "bold"), width=3)
         self.user_icon.pack(side="left", padx=(8, 9), pady=9)
@@ -264,61 +273,69 @@ class MiloDesktop:
         main = tk.Frame(self.root, bg=BG)
         main.pack(side="left", fill="both", expand=True)
 
-        heading = tk.Frame(main, bg=PANEL, height=76)
+        heading = tk.Frame(main, bg=PANEL, height=72)
         heading.pack(fill="x")
         heading.pack_propagate(False)
         self.milo_icon = tk.Label(heading, text="M", bg=EDGE, fg=VIOLET,
                                   font=(FONT, 18, "bold"), width=3)
-        self.milo_icon.pack(side="left", padx=(24, 14), pady=12)
+        self.milo_icon.pack(side="left", padx=(20, 12), pady=10)
         label_stack = tk.Frame(heading, bg=PANEL)
-        label_stack.pack(side="left", pady=12)
-        self.milo_title = tk.Label(label_stack, text="Milo", bg=PANEL, fg=FG,
-                                    font=(FONT, 15, "bold"))
-        self.milo_title.pack(anchor="w")
+        label_stack.pack(side="left", pady=10)
+        title_row = tk.Frame(label_stack, bg=PANEL)
+        title_row.pack(fill="x", anchor="w")
+        self.milo_title = tk.Label(title_row, text="Milo", bg=PANEL, fg=FG,
+                                   font=(FONT, 13, "bold"))
+        self.milo_title.pack(side="left")
+        self.persona_status_label = tk.Label(
+            title_row, text="LOCAL ASSISTANT", bg=COLORS["chip"],
+            fg=VIOLET, font=(FONT, 7, "bold"), padx=6, pady=2)
+        self.persona_status_label.pack(side="left", padx=(9, 0))
         self.connection_label = tk.Label(label_stack, text="Checking local model...",
                                          bg=PANEL, fg=MUTED, font=(FONT, 9))
-        self.connection_label.pack(anchor="w")
-        self.persona_status_label = tk.Label(
-            label_stack, text="Personality not imported",
-            bg=PANEL, fg=MUTED, font=(FONT, 8))
-        self.persona_status_label.pack(anchor="w")
-        new_button(heading, "Reconnect", self.check_connection).pack(
-            side="right", padx=16, pady=18)
+        self.connection_label.pack(anchor="w", pady=(3, 0))
+        reconnect = new_button(heading, "↻  Reconnect", self.check_connection)
+        reconnect.configure(bg=PANEL_BRIGHT, fg=MUTED,
+                            padx=12, pady=6, font=(FONT, 9))
+        reconnect.pack(side="right", padx=16, pady=17)
 
-        self.transcript = tk.Text(main, wrap="word", bg=BG, fg=FG,
-                                  font=(FONT, 11), padx=28, pady=20,
-                                  relief="flat", borderwidth=0,
-                                  highlightthickness=0, state="disabled")
-        self.transcript.pack(fill="both", expand=True)
-        self.transcript.tag_config("user_name", foreground=ORANGE,
-                                   font=(FONT, 11, "bold"), spacing1=17)
-        self.transcript.tag_config("milo_name", foreground=VIOLET,
-                                   font=(FONT, 11, "bold"), spacing1=17)
-        self.transcript.tag_config("body", foreground=FG,
-                                   font=(FONT, 11), lmargin1=3, lmargin2=3,
-                                   spacing3=8)
-        self.transcript.tag_config("time", foreground=MUTED, font=(FONT, 8))
-        self.transcript.tag_config("notice", foreground=MUTED, font=(FONT, 10, "italic"))
-        self.transcript.bind("<Control-c>", lambda _e: None)
+        # Compact, avatar-led DM timeline. View-only; conversation logic
+        # remains in the original MiloConversation and SQLite store.
+        self.chat_view = ChatView(main, background=BG)
+        self.chat_view.pack(fill="both", expand=True)
 
-        composer = tk.Frame(main, bg=PANEL, highlightbackground=EDGE,
-                             highlightthickness=1)
-        composer.pack(fill="x", padx=20, pady=(10, 18))
-        self.entry = tk.Text(composer, height=3, wrap="word")
-        style_text(self.entry)
-        self.entry.pack(side="left", fill="both", expand=True, padx=7, pady=7)
+        composer_border = tk.Frame(main, bg=EDGE)
+        composer_border.pack(fill="x", padx=18, pady=(10, 5))
+        composer = tk.Frame(composer_border, bg=PANEL)
+        composer.pack(fill="both", expand=True, padx=1, pady=1)
+        self.entry = tk.Text(
+            composer, height=2, wrap="word", font=(FONT, 11),
+            bg=PANEL, fg=FG, insertbackground=VIOLET,
+            selectbackground=ACCENT, selectforeground=FG,
+            relief="flat", highlightthickness=0, borderwidth=0,
+            padx=12, pady=10, undo=True)
+        self.entry.pack(side="left", fill="both", expand=True, padx=(3, 0), pady=3)
         self.entry.bind("<Return>", self._enter_key)
-        self.entry.focus_set()
+        self.entry_hint = "Message Milo…"
+        self.entry_placeholder = False
+        self._show_composer_hint()
+        self.entry.bind("<FocusIn>", self._composer_focus_in)
+        self.entry.bind("<FocusOut>", self._composer_focus_out)
+        self.entry.bind("<Control-a>", self._composer_select_all)
+
         actions = tk.Frame(composer, bg=PANEL)
-        actions.pack(side="right", padx=(0, 9), pady=8)
-        self.send_button = new_button(actions, "Send  ↗", self.send, primary=True)
+        actions.pack(side="right", padx=(6, 9), pady=8)
+        self.send_button = new_button(actions, "Send  ➤", self.send, primary=True)
+        self.send_button.configure(padx=15, pady=7)
         self.send_button.pack(fill="x", pady=(0, 5))
         self.stop_button = new_button(actions, "Stop", self.stop)
+        self.stop_button.configure(bg=PANEL_BRIGHT, fg=MUTED,
+                                   font=(FONT, 9), padx=8, pady=5)
         self.stop_button.pack(fill="x")
         self.stop_button.configure(state="disabled")
-        tk.Label(main, text="Local-first  •  Enter to send  •  Shift+Enter for a new line",
-                 bg=BG, fg=MUTED, font=(FONT, 9)).pack(anchor="w", padx=24,
-                                                          pady=(0, 8))
+        tk.Label(main,
+                 text="Private on your device   ·   Enter to send   ·   Shift+Enter for a new line",
+                 bg=BG, fg=MUTED, font=(FONT, 8)).pack(
+                     anchor="w", padx=22, pady=(2, 9))
 
     def toggle_advanced(self):
         self.advanced_open = not self.advanced_open
