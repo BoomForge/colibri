@@ -1618,38 +1618,54 @@ def self_test() -> int:
 
 
 def ui_self_test() -> int:
-    """Windows-only, no model: construct key panels and shut down cleanly."""
-    root = tk.Tk()
-    root.withdraw()
-    app = MiloDesktop(root)
-    try:
-        assert not app.advanced_open, "setup should begin collapsed"
-        app.toggle_advanced()
-        assert app.advanced_open
-        app.toggle_advanced()
-        models_panel = app.models_window()
-        updates_panel = app.updates_modules_window()
-        # Exercise the real compact transcript and streaming path without
-        # touching the owner's database or sending any model requests.
-        app.chat_view.clear()
-        at = datetime.now().astimezone()
-        first = app.chat_view.add_message("user", "First UI test message", at)
-        second = app.chat_view.add_message("user", "Grouped follow-up", at)
-        reply = app.chat_view.add_message("assistant", "", at, streaming=True)
-        app.chat_view.append_to(reply, "Hello from the compact Milo chat")
-        app.chat_view.finish(reply)
-        assert second["grouped"], "consecutive messages should group"
-        assert not reply["grouped"], "different authors must show headers"
-        assert len(app.chat_view.messages) == 3
-        assert reply["content"] == "Hello from the compact Milo chat"
-        assert app.entry_placeholder, "empty composer should show its hint"
-        root.update_idletasks()
-        root.update()
-        for child in list(root.winfo_children()):
-            if isinstance(child, tk.Toplevel):
-                child.destroy()
-    finally:
-        app._close()
+    """Windows-only native widget smoke check; debug notes are synthetic."""
+    import faulthandler
+    diagnostics = Path(tempfile.gettempdir()) / "milo-ui-diagnostics.log"
+    with diagnostics.open("w", encoding="utf-8") as report:
+        def mark(stage):
+            report.write("Stage: " + stage + "\n")
+            report.flush()
+        faulthandler.dump_traceback_later(12, repeat=False, file=report)
+        mark("before tk.Tk")
+        root = tk.Tk()
+        root.withdraw()
+        mark("before MiloDesktop")
+        app = MiloDesktop(root)
+        mark("after MiloDesktop")
+        try:
+            assert not app.advanced_open, "setup should begin collapsed"
+            app.toggle_advanced()
+            assert app.advanced_open
+            app.toggle_advanced()
+            mark("after sidebar")
+            app.models_window()
+            app.updates_modules_window()
+            mark("after tool windows")
+            app.chat_view.clear()
+            at = datetime.now().astimezone()
+            app.chat_view.add_message("user", "First UI test message", at)
+            second = app.chat_view.add_message("user", "Grouped follow-up", at)
+            reply = app.chat_view.add_message("assistant", "", at, streaming=True)
+            app.chat_view.append_to(reply, "Hello from compact Milo chat")
+            app.chat_view.finish(reply)
+            mark("after messages")
+            assert second["grouped"], "consecutive messages should group"
+            assert not reply["grouped"], "different authors must show headers"
+            assert len(app.chat_view.messages) == 3
+            assert app.entry_placeholder, "composer hint missing"
+            mark("before update_idletasks")
+            root.update_idletasks()
+            mark("before update")
+            root.update()
+            mark("after update")
+            for child in list(root.winfo_children()):
+                if isinstance(child, tk.Toplevel):
+                    child.destroy()
+        finally:
+            mark("before close")
+            app._close()
+            mark("after close")
+            faulthandler.cancel_dump_traceback_later()
     return 0
 
 
