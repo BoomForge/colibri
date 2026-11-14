@@ -2969,55 +2969,125 @@ class MiloDesktop:
             messagebox.showerror("Avatar", str(exc))
 
     def memory_window(self):
-        panel = self._panel("Approved memory", "Milo remembers chat history; permanent notes need your approval.")
+        panel = self._panel(
+            "Approved memory",
+            "Review and correct source-labelled permanent memories. "
+            "Nothing is changed without your approval.")
         listbox = tk.Listbox(panel, height=10, bg=BG, fg=FG,
                              selectbackground=EDGE, font=(FONT, 10), relief="flat")
-        listbox.pack(fill="both", expand=True, padx=24, pady=12)
+        listbox.pack(fill="both", expand=True, padx=24, pady=(12, 6))
         note_ids = []
+        provenance = tk.Label(panel, text="Select a note to inspect its source.",
+                              bg=PANEL, fg=MUTED, justify="left", anchor="w",
+                              wraplength=515, font=(FONT, 9))
+        provenance.pack(fill="x", padx=24, pady=(3, 8))
+        editor = tk.Text(panel, height=5, wrap="word")
+        style_text(editor, small=True)
+        editor.pack(fill="x", padx=24, pady=6)
+
         def refresh():
             listbox.delete(0, "end")
             note_ids.clear()
             rows = self.db.db.execute(
                 "SELECT id,text FROM approved_notes ORDER BY id DESC LIMIT 200"
             ).fetchall()
-            for note_id, text in rows:
+            for note_id, note_text in rows:
                 note_ids.append(note_id)
-                listbox.insert("end", text[:110].replace("\n", " "))
-        refresh()
-        editor = tk.Text(panel, height=4, wrap="word")
-        style_text(editor, small=True)
-        editor.pack(fill="x", padx=24, pady=6)
+                listbox.insert("end", note_text[:110].replace("\n", " "))
+            provenance.configure(
+                text="Select a note to see its source and correction history.")
+
+        def selected_id():
+            selection = listbox.curselection()
+            return note_ids[selection[0]] if selection else None
+
+        def inspect(_event=None):
+            note_id = selected_id()
+            if note_id is None:
+                return
+            note = self.db.note_provenance(note_id)
+            if not note:
+                refresh()
+                return
+            editor.delete("1.0", "end")
+            editor.insert("1.0", note["text"])
+            provenance.configure(
+                text="Source: " + note["original_source_kind"] + " · " +
+                note["original_source_ref"] + "\nCreated: " +
+                note["created_at"][:19] +
+                (" · Owner corrections: " + str(note["revision_count"])
+                 if note["revision_count"] else ""))
+
+        listbox.bind("<<ListboxSelect>>", inspect)
+
         def add():
             note = editor.get("1.0", "end-1c").strip()
             if not note:
                 return
-            if not messagebox.askyesno("Approve long-term memory",
-                 "Save this information as an approved persistent memory note?",
-                 parent=panel):
+            if not messagebox.askyesno(
+                    "Approve a NEW long-term memory",
+                    "Save this text as a separate, owner-approved memory note? "
+                    "Use Correct selected to replace an existing note.",
+                    parent=panel):
                 return
             try:
                 self.db.add_approved_note(
                     note, source_kind="owner_approved",
                     source_ref="desktop:" + datetime.now().isoformat(),
-                    approved=True,
-                )
+                    approved=True)
                 editor.delete("1.0", "end")
                 refresh()
             except ValueError as exc:
                 messagebox.showerror("Memory", str(exc), parent=panel)
-        def remove():
-            idx = listbox.curselection()
-            if not idx:
+
+        def correct():
+            note_id = selected_id()
+            if note_id is None:
+                messagebox.showinfo("Correct memory",
+                                    "Select an existing memory first.",
+                                    parent=panel)
                 return
-            if messagebox.askyesno("Delete note", "Permanently delete this memory note?",
-                                   parent=panel):
-                self.db.delete_note(note_ids[idx[0]])
+            note = editor.get("1.0", "end-1c").strip()
+            if not note:
+                return
+            if not messagebox.askyesno(
+                    "Approve memory correction",
+                    "Replace the selected memory with the edited text?\n\n"
+                    "Milo will retain its original source and a local revision "
+                    "record. No other notes or chats are changed.",
+                    parent=panel):
+                return
+            try:
+                changed = self.db.revise_note(note_id, note, approved=True)
+                if changed:
+                    refresh()
+                else:
+                    messagebox.showinfo("Memory",
+                                        "The selected memory is unchanged.",
+                                        parent=panel)
+            except (ValueError, sqlite3.Error) as exc:
+                messagebox.showerror("Memory", str(exc)[:250], parent=panel)
+
+        def remove():
+            note_id = selected_id()
+            if note_id is None:
+                return
+            if messagebox.askyesno(
+                    "Delete note",
+                    "Permanently delete this memory and its correction history?",
+                    parent=panel):
+                self.db.delete_note(note_id)
+                editor.delete("1.0", "end")
                 refresh()
+
         buttons = tk.Frame(panel, bg=PANEL)
         buttons.pack(fill="x", padx=24, pady=16)
-        new_button(buttons, "Save approved note", add, primary=True).pack(
-            side="left", padx=(0, 8))
+        new_button(buttons, "Save new memory", add, primary=True).pack(
+            side="left", padx=(0, 6))
+        new_button(buttons, "Correct selected", correct).pack(
+            side="left", padx=(0, 6))
         new_button(buttons, "Delete selected", remove).pack(side="left")
+        refresh()
 
     def find_files_window(self):
         panel = self._panel("Find files", "Deterministic search. No model or network used.")
