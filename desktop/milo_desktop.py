@@ -39,8 +39,18 @@ from colibri.milo_core.legacy_archive import (
 from colibri.milo_core.portable_backup import BackupError, export_bundle, import_bundle
 from colibri.milo_core.provider import LocalOpenAIProvider, ProviderError
 from colibri.milo_core.store import LocalMemoryStore
+from colibri.milo_core.updates import (
+    CURRENT_VERSION, UpdateError, latest_milo_release,
+    release_version, installer_asset, newer, download_verified,
+    inspect_module_catalog, get_release_asset, MAX_MODULE,
+)
+from colibri.milo_core.modules import (
+    BUILTINS, enabled as module_enabled, set_enabled,
+    load_state as load_module_state, load_module_actions,
+    install_verified_module,
+)
 
-VERSION = "0.1.0-preview"
+VERSION = CURRENT_VERSION
 BG = "#11131e"
 SIDEBAR = "#171a29"
 PANEL = "#1c2030"
@@ -172,6 +182,9 @@ class MiloDesktop:
         self.cancel = threading.Event()
         self.models: list[str] = []
         self.images = {}
+        self.release_candidate = None
+        self.module_catalog = []
+        self.plugin_actions, self.plugin_errors = load_module_actions(DATA_DIR)
         self.current_chat = self.config.get("current_chat") or "main"
         self._build()
         self._refresh_chat_list()
@@ -218,18 +231,24 @@ class MiloDesktop:
             self.toggle_advanced)
         self.advanced_toggle.pack(fill="x")
         self.advanced_controls = tk.Frame(self.advanced_wrap, bg=SIDEBAR)
-        for caption, action in [
-            ("Models", self.models_window),
-            ("Updates & modules", self.updates_modules_window),
-            ("Memory", self.memory_window),
-            ("Restore Milo personality", self.restore_milo_personality),
-            ("Find files", self.find_files_window),
-            ("Ask SOL", self.sol_window),
-            ("Back up / Restore", self.backup_window),
-            ("Settings", self.settings_window),
-        ]:
+        actions = [
+            ("Models", self.models_window, "models"),
+            ("Updates & modules", self.updates_modules_window, None),
+            ("Memory", self.memory_window, "memory"),
+            ("Restore Milo personality", self.restore_milo_personality, "memory"),
+            ("Find files", self.find_files_window, "files"),
+            ("Ask SOL", self.sol_window, "sol"),
+            ("Back up / Restore", self.backup_window, "backup"),
+            ("Settings", self.settings_window, None),
+        ]
+        for caption, action, feature in actions:
+            if feature is not None and not module_enabled(DATA_DIR, feature):
+                continue
             new_button(self.advanced_controls, caption, action).pack(
                 fill="x", pady=2)
+        for plugin_action in self.plugin_actions:
+            new_button(self.advanced_controls, plugin_action.label,
+                       plugin_action.open_panel).pack(fill="x", pady=2)
 
         self.profile_row = tk.Frame(self.side, bg=PANEL)
         self.profile_row.pack(fill="x", side="bottom", padx=12, pady=(6, 13))
@@ -549,6 +568,60 @@ class MiloDesktop:
                     messagebox.showerror(
                         "Colibri startup",
                         event[1] + "\n\nSee %LOCALAPPDATA%\\Milo\\logs\\colibri-service.log")
+                elif kind == "update_check":
+                    self.release_candidate = event[1]
+                    version = release_version(event[1]) if event[1] else ""
+                    self.update_label.configure(
+                        text=("Update available: " + version
+                              if event[1] and newer(version)
+                              else "You're running the latest published Milo version."
+                              if event[1] else "No public Milo release published yet."),
+                        fg=ORANGE if event[1] and newer(version) else MUTED)
+                    self.update_button.configure(
+                        state="normal" if event[1] and newer(version)
+                        else "disabled")
+                elif kind == "update_status":
+                    self.update_label.configure(text=event[1], fg=MUTED)
+                elif kind == "download_ready":
+                    destination = event[1]
+                    if messagebox.askyesno(
+                        "Verified update ready",
+                        "Milo " + event[2] +
+                        " has downloaded and passed SHA-256 verification.\n\n"
+                        "Close Milo and open the installer now? "
+                        "Your existing Models and private memories stay in place."):
+                        try:
+                            import subprocess
+                            subprocess.Popen(
+                                [str(destination)],
+                                stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                close_fds=True)
+                            self._close()
+                        except OSError as exc:
+                            messagebox.showerror("Updater", str(exc)[:250])
+                elif kind == "module_catalog":
+                    self.module_catalog = event[1]
+                    self.catalog_list.delete(0, "end")
+                    for module in self.module_catalog:
+                        self.catalog_list.insert(
+                            "end", f"{module['name']}  ·  v{module['version']}")
+                    if not self.module_catalog:
+                        self.catalog_list.insert("end", "No optional modules published.")
+                    self.update_label.configure(
+                        text=f"{len(self.module_catalog)} modules in the verified release catalog",
+                        fg=MUTED)
+                elif kind == "module_installed":
+                    messagebox.showinfo(
+                        "Milo module installed",
+                        event[1] + " installed and verified. "
+                        "Enable it in the list and restart Milo to load it.")
+                elif kind == "updater_error":
+                    self.update_label.configure(
+                        text="Update failed; existing installation unchanged.",
+                        fg=ORANGE)
+                    messagebox.showerror("Updater", event[1])
                 elif kind == "gguf_model_ready":
                     self.config["model_location"] = event[1]
                     self.config["backend"] = event[2]
@@ -642,6 +715,163 @@ class MiloDesktop:
         )
         self._avatar(self.user_icon, "avatar_user", self.config["user_name"])
         self._avatar(self.milo_icon, "avatar_milo", self.config["milo_name"])
+
+    def updates_modules_window(self):
+        panel = self._panel(
+            "Updates & modules",
+            "Milo updates directly from BoomForge/colibri GitHub Releases.")
+        panel.geometry("660x710")
+        tk.Label(panel, text="Installed version: " + VERSION,
+                 bg=PANEL, fg=FG, font=(FONT, 11, "bold")).pack(
+                     padx=24, anchor="w", pady=(11, 6))
+        self.update_label = tk.Label(
+            panel, text="Choose Check for updates to contact GitHub.",
+            bg=PANEL, fg=MUTED, wraplength=570,
+            font=(FONT, 9), justify="left")
+        self.update_label.pack(anchor="w", padx=24, pady=(0, 8))
+        buttons = tk.Frame(panel, bg=PANEL)
+        buttons.pack(fill="x", padx=24, pady=(0, 13))
+        def check():
+            self.update_label.configure(text="Checking official Milo releases...")
+            def worker():
+                try:
+                    self.events.put(("update_check", latest_milo_release()))
+                except Exception as exc:
+                    self.events.put(("updater_error", str(exc)[:350]))
+            threading.Thread(target=worker, name="milo-check-updates", daemon=True).start()
+        new_button(buttons, "Check for updates", check, primary=True).pack(
+            side="left", padx=(0, 9))
+        def get_update():
+            release = self.release_candidate
+            if not release or not newer(release_version(release)):
+                return
+            version = release_version(release)
+            if not messagebox.askyesno(
+                "Download verified update",
+                "Download Milo " + version + " from your GitHub release? "
+                "The installer will be verified before you can launch it.",
+                parent=panel):
+                return
+            def worker():
+                try:
+                    asset = installer_asset(release)
+                    destination = DATA_DIR / "updates" / asset.name
+                    def progress(done, size):
+                        step = int(100 * done / size)
+                        if step in (25, 50, 75, 100) or done == size:
+                            self.events.put(("update_status", f"Downloading Milo {version}: {step}%"))
+                    download_verified(asset, destination, progress=progress)
+                    self.events.put(("download_ready", destination, version))
+                except Exception as exc:
+                    self.events.put(("updater_error", str(exc)[:350]))
+            threading.Thread(target=worker, name="milo-download-update", daemon=True).start()
+        self.update_button = new_button(
+            buttons, "Download verified installer", get_update)
+        self.update_button.configure(state="disabled")
+        self.update_button.pack(side="left")
+
+        tk.Frame(panel, height=1, bg=EDGE).pack(fill="x", padx=24, pady=(4, 12))
+        tk.Label(panel, text="Built-in features", bg=PANEL, fg=VIOLET,
+                 font=(FONT, 12, "bold")).pack(anchor="w", padx=24)
+        tk.Label(panel,
+                 text="Disable optional panels without deleting data. "
+                      "Changes take effect after restarting Milo.",
+                 bg=PANEL, fg=MUTED, wraplength=560).pack(anchor="w", padx=24, pady=5)
+        for module_id, (name, description, _default) in BUILTINS.items():
+            var = tk.BooleanVar(value=module_enabled(DATA_DIR, module_id))
+            line = tk.Frame(panel, bg=PANEL)
+            line.pack(fill="x", padx=24, pady=2)
+            def update_feature(value, key=module_id):
+                try:
+                    set_enabled(DATA_DIR, key, bool(value.get()))
+                except Exception as exc:
+                    messagebox.showerror("Modules", str(exc)[:250], parent=panel)
+            tk.Checkbutton(
+                line, text=name, variable=var,
+                command=lambda v=var, k=module_id: update_feature(v, k),
+                bg=PANEL, fg=FG, selectcolor=BG,
+                activebackground=PANEL, activeforeground=FG,
+                font=(FONT, 10)).pack(anchor="w")
+            tk.Label(line, text=description, bg=PANEL, fg=MUTED,
+                     font=(FONT, 8)).pack(anchor="w", padx=25)
+
+        tk.Label(panel, text="Optional feature packages", bg=PANEL, fg=VIOLET,
+                 font=(FONT, 12, "bold")).pack(anchor="w", padx=24, pady=(14, 4))
+        self.catalog_list = tk.Listbox(
+            panel, bg=BG, fg=FG, height=5, relief="flat",
+            selectbackground=EDGE, font=(FONT, 10),
+            exportselection=False)
+        self.catalog_list.pack(fill="both", expand=True, padx=24, pady=5)
+        self.catalog_list.insert("end", "Check the release catalog to see available modules.")
+
+        existing = load_module_state(DATA_DIR).get("installed", {})
+        if existing:
+            tk.Label(panel, text="Installed: " + ", ".join(
+                f"{key} v{val}" for key, val in sorted(existing.items())),
+                bg=PANEL, fg=MUTED, wraplength=580).pack(
+                    anchor="w", padx=24, pady=3)
+        catalog_buttons = tk.Frame(panel, bg=PANEL)
+        catalog_buttons.pack(fill="x", padx=24, pady=(5, 16))
+        def find_modules():
+            self.update_label.configure(text="Checking first-party module catalog...")
+            def worker():
+                try:
+                    release = latest_milo_release()
+                    if release is None:
+                        raise UpdateError("no public Milo release with modules exists yet")
+                    catalog = inspect_module_catalog(release)
+                    self.events.put(("module_catalog", catalog))
+                except Exception as exc:
+                    self.events.put(("updater_error", str(exc)[:350]))
+            threading.Thread(target=worker, name="milo-catalog", daemon=True).start()
+        new_button(catalog_buttons, "Check module catalog", find_modules).pack(
+            side="left", padx=(0, 8))
+        def install_selected():
+            index = self.catalog_list.curselection()
+            if not index or index[0] >= len(self.module_catalog):
+                return
+            entry = self.module_catalog[index[0]]
+            current = load_module_state(DATA_DIR).get("installed", {}).get(entry["id"])
+            if current == entry["version"]:
+                messagebox.showinfo("Modules", "This module is already installed.",
+                                    parent=panel)
+                return
+            if not messagebox.askyesno(
+                "Install first-party module",
+                "Download and install " + entry["name"] +
+                " v" + entry["version"] + " from BoomForge/colibri?\n\n"
+                "Python feature modules are trusted executable code, not "
+                "sandboxed. They are disabled until you explicitly enable "
+                "them and restart Milo.",
+                parent=panel):
+                return
+            def worker():
+                try:
+                    release = latest_milo_release()
+                    if release is None:
+                        raise UpdateError("release catalog unavailable")
+                    catalog = inspect_module_catalog(release)
+                    if not any(x == entry for x in catalog):
+                        raise UpdateError("module catalog changed during installation")
+                    asset = get_release_asset(
+                        release, entry["asset"], max_bytes=MAX_MODULE)
+                    downloaded = download_verified(
+                        asset, DATA_DIR / "module-downloads" / asset.name)
+                    install_verified_module(
+                        DATA_DIR, downloaded,
+                        module_id=entry["id"], version=entry["version"])
+                    self.events.put(("module_installed", entry["name"]))
+                except Exception as exc:
+                    self.events.put(("updater_error", str(exc)[:350]))
+            threading.Thread(target=worker, name="milo-module-install",
+                             daemon=True).start()
+        new_button(catalog_buttons, "Install selected module",
+                   install_selected, primary=True).pack(side="left")
+        tk.Label(
+            panel, text="Updates preserve Models and local memories. "
+                        "Installed modules activate after a restart.",
+            bg=PANEL, fg=MUTED, font=(FONT, 8),
+            wraplength=590).pack(anchor="w", padx=24, pady=(0, 8))
 
     def models_window(self):
         panel = self._panel(
