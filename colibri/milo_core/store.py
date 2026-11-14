@@ -61,6 +61,15 @@ class LocalMemoryStore:
                 "id INTEGER PRIMARY KEY, text TEXT NOT NULL, source_kind TEXT NOT NULL, "
                 "source_ref TEXT NOT NULL, created_at TEXT NOT NULL)"
             )
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS approved_note_edits("
+                "id INTEGER PRIMARY KEY, "
+                "note_id INTEGER NOT NULL REFERENCES approved_notes(id) ON DELETE CASCADE, "
+                "previous_text TEXT NOT NULL, "
+                "previous_source_kind TEXT NOT NULL, "
+                "previous_source_ref TEXT NOT NULL, "
+                "edited_at TEXT NOT NULL)"
+            )
 
     def append_turn(self, chat_id: str, user_text: str, assistant_text: str) -> None:
         _validate_text(chat_id, max_chars=128)
@@ -125,6 +134,56 @@ class LocalMemoryStore:
                 ranked.append((score, row[0], MemoryNote(*row)))
         ranked.sort(key=lambda x: (-x[0], -x[1]))
         return [note for _score, _id, note in ranked[:limit]]
+
+    def revise_note(self, note_id: int, corrected_text: str, *,
+                    approved: bool = False) -> bool:
+        """Explicit user correction with original source saved as provenance.
+
+        Never silently edit or infer a correction from ordinary conversation.
+        """
+        if not approved:
+            raise PermissionError("correcting permanent memory requires approval")
+        _validate_text(corrected_text, max_chars=4000)
+        row = self.db.execute(
+            "SELECT text,source_kind,source_ref FROM approved_notes WHERE id=?",
+            (note_id,)).fetchone()
+        if row is None:
+            raise ValueError("memory note no longer exists")
+        corrected_text = corrected_text.strip()
+        if row[0] == corrected_text:
+            return False
+        with self.db:
+            self.db.execute(
+                "INSERT INTO approved_note_edits("
+                "note_id,previous_text,previous_source_kind,"
+                "previous_source_ref,edited_at) VALUES(?,?,?,?,?)",
+                (note_id, row[0], row[1], row[2], _utc_now()))
+            self.db.execute(
+                "UPDATE approved_notes SET text=?, source_kind=? WHERE id=?",
+                (corrected_text, "owner_corrected", note_id))
+        return True
+
+    def note_provenance(self, note_id: int) -> dict | None:
+        row = self.db.execute(
+            "SELECT id,text,source_kind,source_ref,created_at "
+            "FROM approved_notes WHERE id=?", (note_id,)).fetchone()
+        if row is None:
+            return None
+        first = self.db.execute(
+            "SELECT previous_source_kind,previous_source_ref,edited_at "
+            "FROM approved_note_edits WHERE note_id=? ORDER BY id ASC LIMIT 1",
+            (note_id,)).fetchone()
+        edits = self.db.execute(
+            "SELECT COUNT(*) FROM approved_note_edits WHERE note_id=?",
+            (note_id,)).fetchone()[0]
+        return {
+            "id": row[0], "text": row[1], "source_kind": row[2],
+            "source_ref": row[3], "created_at": row[4],
+            "original_source_kind": first[0] if first else row[2],
+            "original_source_ref": first[1] if first else row[3],
+            "first_corrected_at": first[2] if first else None,
+            "revision_count": edits,
+        }
 
     def delete_note(self, note_id: int) -> bool:
         with self.db:
