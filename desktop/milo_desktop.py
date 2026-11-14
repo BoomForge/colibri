@@ -46,6 +46,10 @@ from colibri.milo_core.model_catalog import (
     MODEL_PAGE, ModelDownloadError, inspect_abliterated_release,
     download_abliterated,
 )
+from colibri.milo_core.research_model import (
+    MODEL_PAGE as RESEARCH_MODEL_PAGE,
+    inspect_research_asset, download_research_asset,
+)
 from colibri.milo_core.local_engine import (
     LocalEngine, EngineStartupError, chosen_model, discover_models,
     install_root, managed_models_root, model_valid,
@@ -1767,10 +1771,24 @@ class MiloDesktop:
                         fg=ORANGE)
                     messagebox.showerror("Updater", event[1])
                 elif kind == "gguf_model_ready":
-                    self.config["model_location"] = event[1]
-                    self.config["backend"] = event[2]
-                    save_config(self.config)
-                    self.check_connection()
+                    if len(event) > 3 and event[3] == "research":
+                        original = get_bot(self.db.db, "research")
+                        if original:
+                            save_bot(self.db.db, Bot(
+                                original.id, original.name,
+                                original.instructions, event[1],
+                                original.avatar, original.active))
+                        self._refresh_chat_context()
+                        messagebox.showinfo(
+                            "Research model installed",
+                            "The optional Thinking checkpoint is now the "
+                            "Research specialist's preferred model. Milo's "
+                            "current model and your existing chats are unchanged.")
+                    else:
+                        self.config["model_location"] = event[1]
+                        self.config["backend"] = event[2]
+                        save_config(self.config)
+                        self.check_connection()
                 elif kind == "model_download_progress":
                     self.connection_label.configure(
                         text=f"Downloading optional Qwen model  •  {event[1]}%",
@@ -1779,6 +1797,11 @@ class MiloDesktop:
                     self.model_download_active = False
                     self._import_loose_gguf(
                         Path(event[1]), event[2], parent=None)
+                elif kind == "research_model_download_done":
+                    self.model_download_active = False
+                    self._import_loose_gguf(
+                        Path(event[1]), event[2], parent=None,
+                        assigned_to="research")
                 elif kind == "model_download_error":
                     self.model_download_active = False
                     self.connection_label.configure(
@@ -2332,6 +2355,51 @@ class MiloDesktop:
         new_button(
             variant_row, "Cancel download",
             self.model_download_cancel.set).pack(side="left")
+        research_row = tk.Frame(panel, bg=PANEL)
+        research_row.pack(fill="x", padx=24, pady=(0, 8))
+        def install_research_thinking():
+            if self.model_download_active or self.busy or self.engine_starting:
+                messagebox.showinfo(
+                    "Models", "Finish the current response or download first.",
+                    parent=panel)
+                return
+            if not messagebox.askyesno(
+                "Optional Research Thinking model",
+                "Download Qwen3-4B-Thinking-2507 Q4_K_M (~2.5 GB)?\n\n"
+                "This is an optional quantised Qwen3 model, not a new engine. "
+                "Colibri registers the Qwen3 family, but its actual "
+                "performance on this PC still requires your test.\n\n"
+                "Only the Research specialist will use this model by default; "
+                "Milo and coding specialists will retain the working checkpoint.\n\n"
+                "Publisher: " + RESEARCH_MODEL_PAGE + "\n\nContinue?",
+                parent=panel):
+                return
+            chosen_backend = backend.get()
+            self.model_download_cancel.clear()
+            self.model_download_active = True
+            self.connection_label.configure(
+                text="Downloading Research Thinking model…", fg=ORANGE)
+            def worker():
+                try:
+                    asset = inspect_research_asset()
+                    def report(done, size):
+                        percent = int(100 * done / size)
+                        if percent % 10 == 0:
+                            self.events.put(("model_download_progress", percent))
+                    source = download_research_asset(
+                        self.models_root, asset,
+                        progress=report, cancel=self.model_download_cancel)
+                    self.events.put((
+                        "research_model_download_done", str(source), chosen_backend))
+                except Exception as exc:
+                    self.events.put(("model_download_error", str(exc)[:350]))
+            threading.Thread(
+                target=worker, daemon=True,
+                name="milo-research-model-download").start()
+        new_button(
+            research_row,
+            "Download Research Qwen3 Thinking (optional)",
+            install_research_thinking).pack(side="left")
         folder_actions = tk.Frame(panel, bg=PANEL)
         folder_actions.pack(fill="x", padx=24, pady=(0, 14))
         new_button(
@@ -2347,7 +2415,8 @@ class MiloDesktop:
             else messagebox.showinfo("Colibri", "No local engine log yet.", parent=panel),
         ).pack(side="left")
 
-    def _import_loose_gguf(self, source: Path, backend: str, *, parent=None):
+    def _import_loose_gguf(self, source: Path, backend: str, *,
+                           parent=None, assigned_to=None):
         """Run the bundled Colibri GGUF reader silently, then select model."""
         if self.busy or self.engine_starting:
             messagebox.showinfo(
@@ -2424,7 +2493,8 @@ class MiloDesktop:
                 if not model_valid(converted):
                     raise RuntimeError("Colibri did not create a loadable model folder")
                 relative = str(converted.relative_to(self.models_root))
-                self.events.put(("gguf_model_ready", relative, requested_backend))
+                self.events.put(("gguf_model_ready", relative, requested_backend,
+                                 assigned_to))
             except Exception as exc:
                 self.events.put(("model_import_error", str(exc)[:450]))
         threading.Thread(target=worker, name="milo-gguf-import", daemon=True).start()
