@@ -16,7 +16,7 @@ import re
 from typing import Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 
 MAX_IMAGES = 3
@@ -103,6 +103,20 @@ def _encode_image(path: Path) -> str:
         raise VisionError("Cannot decode the selected image") from exc
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    """Never allow a local endpoint to redirect image data elsewhere."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_local(request: Request, timeout: float):
+    # URLopen may use system proxy settings. This opener never uses a proxy
+    # and never follows redirects, even when machine proxy policy changes.
+    return build_opener(ProxyHandler({}), _NoRedirect()).open(
+        request, timeout=timeout)
+
+
 class OllamaLocalVision:
     """Request-scoped backend using Ollama's native local image API."""
 
@@ -143,7 +157,7 @@ class OllamaLocalVision:
                               headers={"Content-Type": "application/json"},
                               method="POST")
             try:
-                with urlopen(request, timeout=self.timeout) as response:
+                with _open_local(request, timeout=self.timeout) as response:
                     payload = response.read(MAX_RESPONSE_BYTES + 1)
             except (HTTPError, URLError, TimeoutError, OSError) as exc:
                 raise VisionError(
