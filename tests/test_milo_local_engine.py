@@ -55,7 +55,7 @@ class ModelFoldersTest(unittest.TestCase):
             root = managed_models_root(Path(tmp))
             gguf = root / "Qwen3-4B.gguf"
             gguf.write_bytes(b"GGUF" + b"\0" * 100)
-            self.assertEqual(discover_loose_gguf(root), [gguf])
+            self.assertEqual(discover_loose_gguf(root), [gguf.resolve()])
             sidecar = gguf_target(root, gguf)
             self.assertEqual(sidecar.name, "Qwen3-4B.colibri")
             sidecar.mkdir()
