@@ -1789,9 +1789,17 @@ def ui_self_test() -> int:
             app.chat_view.append_to(reply, "Hello from compact Milo chat")
             app.chat_view.finish(reply)
             mark("after messages")
+            fence = chr(96) * 3
+            code = app.chat_view.add_message(
+                "assistant", "Example code:\n" + fence + "python\n"
+                + "print(42)\n" + fence + "\n", at)
+            mark("after code block")
             assert second["grouped"], "consecutive messages should group"
             assert not reply["grouped"], "different authors must show headers"
-            assert len(app.chat_view.messages) == 3
+            assert len(app.chat_view.messages) == 4
+            assert reply["content"] == "Hello from compact Milo chat"
+            assert code["body"].copy_widgets, "copyable Tk text widgets missing"
+            assert len(code["body"].copy_widgets) >= 2, "code block missing"
             assert app.entry_placeholder, "composer hint missing"
             mark("before update_idletasks")
             root.update_idletasks()
