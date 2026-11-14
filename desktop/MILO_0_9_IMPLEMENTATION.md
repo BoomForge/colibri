@@ -2,7 +2,7 @@
 
 **Status:** working development branch and unsigned Windows installer PREVIEW.
 **Released baseline:** Milo 0.9.2 is available from GitHub Releases. This document
-covers Milo 0.9.4, built and released separately after its Windows CI checks.
+covers Milo 0.9.6, built and released separately after its Windows CI checks.
 **Branch:** feature/milo-09-desktop-awareness.
 **Draft PR:** https://github.com/BoomForge/colibri/pull/1
 
@@ -30,6 +30,55 @@ covers Milo 0.9.4, built and released separately after its Windows CI checks.
   launch on the owner's PC. If Windows blocks the unsigned installer or
   app, reopening may require owner action.
 
+## Windows PC control — 0.9.6 (owner-approved tools)
+
+Milo now includes a deterministic local PC broker in `colibri/milo_core/pc_broker.py`.
+Only commands deliberately typed by the owner in Milo chat can propose an
+action. Neither LLM output nor untrusted document, website, email or plugin
+text can trigger PC control. Every operation shows a COMPLETE preview in a
+scrollable modal dialog; Cancel has no side effects. The local Tool activity
+log stores only fixed action labels and outcomes, not file names, typed text
+or URLs. No broadly-scoped automatic approval is saved.
+
+Use Setup & modules → PC control to see examples, add local .exe apps with
+the native owner file picker and revoke their launch registration. Registering
+an app does not grant automatic launch permission: every run still asks.
+Known apps launch only from the trusted Windows system directory. The
+broker does not run arbitrary shell scripts, PowerShell, or model-generated code.
+
+Example commands (owner enters these in Milo chat):
+- `open notepad`
+- `open blender` (once its .exe has been registered by the owner)
+- `open downloads`
+- `open https://example.org`
+- `list files in documents`
+- `list open windows`
+- `switch to Notepad`
+- `type "Hello!" into Notepad` (requires a matching non-sensitive visible
+  target; Unicode text only, no clipboard or Enter key)
+- `rename "old.txt" to "new.txt" in downloads` (same extension, no overwrite)
+- `create note "ideas.md" in documents with text "Start here"`
+- `move files containing "sprite" from downloads to documents` (exact
+  preview of all matching assets, same drive, no recursive traversal and
+  source-change checks before moving; never overwrites existing files)
+
+Existing capabilities remain: deterministic file search, Windows Settings
+shortcuts, consented screenshots, safe previews, optional local vision,
+and the manual file organiser. The Colibri text model is not required to
+execute supported deterministic operations.
+
+NOT yet supported: unattended visual clicking, arbitrary keyboard/mouse
+automation, multi-step browser agents, unlimited file deletion/modification,
+email/calendar providers, voice assistants or local image generation. These
+are distinct later modules in the original Nov 14 product handoff. The 4B
+text model cannot directly see the desktop without the approved vision
+service, and it cannot call arbitrary Windows APIs. Vague commands outside
+the allowlist may only receive advice, not real execution.
+
+Windows CI covers typed-action planning, owner-approval refusal, mock app
+execution, exact file move preflight and validation, no-overwrite rename,
+document creation, app registry revocation, and frozen UI integration.
+Real window activation/Unicode typing still needs owner-machine validation.
 ## Implemented
 
 ### Windows system tray (0.9.3)
@@ -107,8 +156,8 @@ The unsigned 0.9 installer preview is produced by:
 https://github.com/BoomForge/colibri/actions/workflows/milo-09-preview-installer.yml
 
 Use the latest SUCCESSFUL run for this branch; open its Artifacts section and
-download **Milo-Installer-0.9.4-Preview**. Extract the artifact ZIP and run
-Milo-Setup-0.9.4.exe. Do not install if the run is failed or incomplete.
+download **Milo-Installer-0.9.6-Preview**. Extract the artifact ZIP and run
+Milo-Setup-0.9.6.exe. Do not install if the run is failed or incomplete.
 No external Ollama or vision weights are bundled in the Windows installer.
 Milo 0.9.2 remains available as the previous GitHub Release.
 
