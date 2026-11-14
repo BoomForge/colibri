@@ -1159,6 +1159,30 @@ class MiloDesktop:
             messagebox.showerror("Invalid model settings", str(exc))
             return
 
+        research_query = ""
+        if target_id != "milo" and wants_research(clean_prompt):
+            if not web_enabled(self.db.db, target_id):
+                messagebox.showinfo(
+                    "Internet research disabled",
+                    "Web research is disabled for @" + target_id +
+                    ". Open its bot editor (⋯) and enable Web research. "
+                    "Milo will confirm each actual search before connecting.")
+                return
+            try:
+                research_query = query_for_research(clean_prompt)
+            except ResearchError as exc:
+                messagebox.showerror("Web research", str(exc)[:240])
+                return
+            if not messagebox.askyesno(
+                "Allow web research for @" + target_id,
+                "Milo will send ONLY this current search request to a public "
+                "web search service, then fetch a limited number of public "
+                "HTTPS pages.\n\n" + research_query[:240] +
+                "\n\nUploaded documents, memory, private transcripts and "
+                "specialist instructions are NOT uploaded. "
+                "Continue with this one search?"):
+                return
+
         chat_id = self.current_chat
         self.pending_send = None
         self.entry.delete("1.0", "end")
@@ -1174,6 +1198,13 @@ class MiloDesktop:
 
         def worker():
             try:
+                research_context = ""
+                answer_suffix = ""
+                if research_query:
+                    self.events.put(("research_status", "Searching the public web…"))
+                    sources = search_public_web(research_query)
+                    research_context = source_context(sources)
+                    answer_suffix = source_footer(sources)
                 with LocalMemoryStore(DB_PATH) as store:
                     provider = LocalOpenAIProvider(
                         model=model, base_url=self.active_base_url)
@@ -1185,7 +1216,9 @@ class MiloDesktop:
                             name=author_name, instructions=instructions),
                         bot_id=target_id, bot_name=author_name,
                         bot_avatar=bot.avatar if bot else "",
-                        shared_room=(settings.kind == "room"))
+                        shared_room=(settings.kind == "room"),
+                        research_context=research_context,
+                        answer_suffix=answer_suffix)
                     chunks = conversation.stream_reply(
                         clean_prompt, chat_id=chat_id,
                         stored_user_text=prompt)
@@ -1408,6 +1441,8 @@ class MiloDesktop:
                         self.pending_message = None
                     self._set_busy(False)
                     self._refresh_chat_list()
+                elif kind == "research_status":
+                    self.connection_label.configure(text=event[1], fg=ORANGE)
                 elif kind == "chunk":
                     if event[1] == self.current_chat and self.pending_message is not None:
                         self.chat_view.append_to(self.pending_message, event[2])
@@ -1417,6 +1452,7 @@ class MiloDesktop:
                         self.pending_message = None
                     self._set_busy(False)
                     self._refresh_chat_list()
+                    self._refresh_chat_context()
                 elif kind == "cancelled":
                     if self.pending_message is not None:
                         self.chat_view.finish(
