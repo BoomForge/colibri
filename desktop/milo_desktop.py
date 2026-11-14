@@ -30,6 +30,9 @@ except ImportError:
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from desktop.chat_view import ChatView, ConversationList, COLORS, avatar_widget, AvatarBank
 
+from colibri.milo_core.windows_actions import (
+    WindowsAction, available_actions, parse_action_request, execute_action,
+)
 from colibri.milo_core.global_hotkey import GlobalQuickChatHotkey
 from colibri.milo_core.tool_activity import (
     init_activity, record_activity, list_activity, clear_activity,
@@ -325,6 +328,7 @@ class MiloDesktop:
             ("Memory", self.memory_window, "memory"),
             ("Restore Milo personality", self.restore_milo_personality, "memory"),
             ("Find files", self.find_files_window, "files"),
+            ("Windows tools", self.windows_tools_window, "files"),
             ("Ask SOL", self.sol_window, "sol"),
             ("Back up / Restore", self.backup_window, "backup"),
             ("Settings", self.settings_window, None),
@@ -1461,6 +1465,61 @@ class MiloDesktop:
                 messagebox.showerror("Screenshot preview", str(exc)[:220],
                                      parent=self.root)
 
+    def windows_tools_window(self):
+        panel = self._panel(
+            "Windows tools",
+            "Fixed, verified Windows Settings shortcuts. "
+            "Every open action asks permission. No arbitrary commands.")
+        tk.Label(
+            panel,
+            text="Choose a settings page to open. Milo will show the exact "
+                 "Windows URI before launching it, and won't change any settings.",
+            bg=PANEL, fg=MUTED, font=(FONT, 9), wraplength=490,
+            justify="left").pack(anchor="w", padx=24, pady=(10, 15))
+        for action in available_actions():
+            button = new_button(
+                panel, action.title,
+                lambda selected=action: self._perform_windows_action(selected))
+            button.configure(anchor="w", padx=16, pady=9)
+            button.pack(fill="x", padx=24, pady=4)
+        return panel
+
+    def _perform_windows_action(self, action: WindowsAction, chat_context=None):
+        if self.busy:
+            messagebox.showinfo("Milo is responding",
+                                "Finish the current response first.",
+                                parent=self.root)
+            return
+        if not messagebox.askyesno(
+                "Approve Windows action",
+                "Open " + action.title + "?\n\n"
+                "Exact local Windows Settings URI:\n" + action.uri +
+                "\n\nMilo won't click, type or change any settings.",
+                parent=self.root):
+            self._audit("windows_settings", "denied")
+            return
+        self._audit("windows_settings", "approved")
+        try:
+            execute_action(action, approved=True)
+            reply = "Opened Windows " + action.title + ". No settings were changed."
+            outcome = "completed"
+        except (OSError, ValueError) as exc:
+            reply = "I couldn't open " + action.title + ": " + str(exc)[:220]
+            outcome = "failed"
+        self._audit("windows_settings", outcome)
+        if chat_context is None:
+            if outcome == "failed":
+                messagebox.showerror("Windows tools", reply, parent=self.root)
+            else:
+                messagebox.showinfo("Windows tools", reply, parent=self.root)
+            return
+        chat_id, prompt, target_id, author_name, author_avatar, shared = chat_context
+        self._begin_tool_turn(chat_id, prompt, target_id,
+                              author_name, author_avatar)
+        self.events.put((
+            "windows_action_result", chat_id, prompt, reply, target_id,
+            author_name, "", shared))
+
     def activity_window(self):
         window = self._panel("Tool activity",
             "Local history of approvals, completions and failures. "
@@ -1565,6 +1624,19 @@ class MiloDesktop:
         author_avatar = self._bot_avatar_path(bot)
         model_location = model_for_turn(
             settings, bot, self.config.get("model_location", ""))
+
+        # A small Windows action allowlist is handled without model inference.
+        # The user sees the exact operation and must approve execution.
+        requested_windows = (parse_action_request(clean_prompt)
+                             if target_id == "milo" and
+                             module_enabled(DATA_DIR, "files") else None)
+        if requested_windows is not None:
+            self._perform_windows_action(
+                requested_windows,
+                chat_context=(self.current_chat, prompt, target_id,
+                              author_name, author_avatar,
+                              settings.kind == "room"))
+            return
 
         # A filename-specific "open" request uses deterministic local file
         # resolution. It NEVER invokes the model or executes the named file.
@@ -2098,6 +2170,18 @@ class MiloDesktop:
                     self.check_connection()
                 elif kind == "model_import_error":
                     messagebox.showerror("Model import", event[1])
+                elif kind == "windows_action_result":
+                    chat_id, prompt, reply = event[1:4]
+                    self._save_direct_turn(
+                        chat_id, prompt, reply, event[4], event[5],
+                        event[6], event[7])
+                    if chat_id == self.current_chat and self.pending_message is not None:
+                        self.chat_view.append_to(self.pending_message, reply)
+                        self.chat_view.finish(self.pending_message)
+                        self.pending_message = None
+                    self._set_busy(False)
+                    self._refresh_chat_list()
+                    self._restore_service_status()
                 elif kind == "file_preview_ready":
                     chat_id, prompt, chosen_path = event[1:4]
                     try:
@@ -3345,6 +3429,9 @@ def ui_self_test() -> int:
             activity = app.activity_window()
             assert activity.winfo_exists(), "Tool activity viewer missing"
             activity.destroy()
+            windows_tools = app.windows_tools_window()
+            assert windows_tools.winfo_exists(), "Windows action picker missing"
+            windows_tools.destroy()
             app._audit("quick_chat", "completed")
             assert list_activity(app.db.db)[0][1:] == (
                 "quick_chat", "completed"), "Activity log did not persist"
