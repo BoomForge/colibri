@@ -48,9 +48,13 @@ class ScreenTests(unittest.TestCase):
                 capture_primary_screen(Path(folder), platform="linux")
 
     def test_one_shot_capture_writes_only_local_file(self):
-        from PIL import Image
+        class StubImage:
+            width = 8
+            height = 8
+            def save(self, path, format=None):
+                Path(path).write_bytes(b"minimal synthetic PNG placeholder")
         with tempfile.TemporaryDirectory() as folder:
-            grab = mock.Mock(return_value=Image.new("RGB", (8, 8), "black"))
+            grab = mock.Mock(return_value=StubImage())
             path = capture_primary_screen(Path(folder), grabber=grab,
                                           platform="win32")
             self.assertTrue(path.is_file())
