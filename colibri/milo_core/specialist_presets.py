@@ -13,7 +13,7 @@ import sqlite3
 from .bots import Bot, get_bot, save_bot
 from .web_research import init_web_prefs
 
-RESEARCH_PROMPT = """You are Research, Milo's specialist companion for careful, grounded investigation.
+RESEARCH_PROMPT = """You are Sage, Milo's specialist companion for careful, grounded investigation.
 PURPOSE
 - Investigate public questions across science, technology, history, humanities, media, law, business, engineering and everyday research. Do not limit yourself to a single topic.
 - Search the live web when the owner asks for factual research, recent developments, a comparison, verification, or sources. If a search is not actually performed, state that plainly. Never fabricate citations, URLs, access dates, experiments or verification.
@@ -31,7 +31,7 @@ WORKING STYLE
 - Do not imply live web capability if a request was not approved or the provider failed.
 - Protect private documents: their contents must not be included in an outbound public web search query."""
 
-WEB_DEVELOPMENT_PROMPT = """You are WebDev, Milo's specialist full-stack web-development engineer.
+WEB_DEVELOPMENT_PROMPT = """You are Nova, Milo's specialist full-stack web-development engineer.
 PURPOSE
 - Help build, debug, review, maintain and deploy websites and web apps: HTML/CSS, JavaScript/TypeScript, React, Vue, Svelte, Node, Python backends, APIs, SQL, accessibility, SEO and hosting.
 ENGINEERING PROCESS
@@ -48,7 +48,7 @@ QUALITY
 RESPONSE STRUCTURE
 - State diagnosis and assumptions; give a focused patch; list verification commands/tests; flag any unresolved unknowns. Distinguish suggested code from tested results."""
 
-GAME_DEVELOPMENT_PROMPT = """You are GameDev, Milo's specialist game-development and technical-art assistant.
+GAME_DEVELOPMENT_PROMPT = """You are Forge, Milo's specialist game-development and technical-art assistant.
 PURPOSE
 - Assist with indie game production, game mechanics, quest/dialogue systems, level design, narrative, gameplay balancing, asset workflows, shaders, materials, rigging, animation, procedural generation, performance optimisation and packaging.
 - Cover practical workflows for Blender, Unity, Unreal, Godot and custom engines. Determine the user's actual version/engine before suggesting APIs or nodes.
@@ -73,9 +73,9 @@ class Preset:
 
 
 PRESETS = (
-    Preset("research", "Research", RESEARCH_PROMPT, "research"),
-    Preset("webdev", "Web Development", WEB_DEVELOPMENT_PROMPT, "coder"),
-    Preset("gamedev", "Game Development", GAME_DEVELOPMENT_PROMPT, "coder"),
+    Preset("research", "Sage", RESEARCH_PROMPT, "research"),
+    Preset("webdev", "Nova", WEB_DEVELOPMENT_PROMPT, "coder"),
+    Preset("gamedev", "Forge", GAME_DEVELOPMENT_PROMPT, "coder"),
 )
 
 
@@ -101,21 +101,55 @@ def suggested_installed_model(models_root: Path, family: str) -> str:
 
 
 def ensure_specialists(db: sqlite3.Connection, models_root: Path) -> list[str]:
-    """Idempotently create default bots without changing owner edits."""
+    """Create and identity-migrate the three built-ins, without losing data.
+
+    Internal IDs remain research/webdev/gamedev to preserve existing private
+    DMs, document scopes, web permissions, source attribution and model choices.
+    Display names update ONCE only, so later owner edits remain owner edits.
+    """
     init_web_prefs(db)
     added = []
+    identities = {
+        "research": ("Research", "You are Research"),
+        "webdev": ("Web Development", "You are WebDev"),
+        "gamedev": ("Game Development", "You are GameDev"),
+    }
+    with db:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS specialist_identity_migrations("
+            "key TEXT PRIMARY KEY)")
+    migrated = db.execute(
+        "SELECT 1 FROM specialist_identity_migrations "
+        "WHERE key='anime_specialist_names_v1'").fetchone() is not None
     for preset in PRESETS:
-        if get_bot(db, preset.id) is not None:
-            continue
-        preferred = suggested_installed_model(models_root, preset.recommended_family)
-        save_bot(db, Bot(preset.id, preset.name, preset.instructions, preferred, "", True))
-        added.append(preset.id)
-        if preset.id == "research":
-            # Enable this bot only. Actual public-web access still requires
-            # the owner to approve EVERY search in the desktop interface.
+        current = get_bot(db, preset.id)
+        if current is None:
+            preferred = suggested_installed_model(models_root, preset.recommended_family)
+            save_bot(db, Bot(preset.id, preset.name, preset.instructions, preferred, "", True))
+            added.append(preset.id)
+            if preset.id == "research":
+                # Preserve existing web access approval; it still requires
+                # per-search confirmation and uses the original scope ID.
+                with db:
+                    db.execute(
+                        "INSERT OR IGNORE INTO bot_web_permissions(bot_id,enabled) "
+                        "VALUES('research',1)"
+                    )
+        elif not migrated:
+            old_name, old_intro = identities[preset.id]
+            legacy_prompt = preset.instructions.replace(
+                "You are " + preset.name, old_intro, 1)
+            # Custom instructions and model choices are left as-is.
+            newer_prompt = (preset.instructions
+                            if current.instructions == legacy_prompt
+                            else current.instructions)
             with db:
                 db.execute(
-                    "INSERT OR IGNORE INTO bot_web_permissions(bot_id,enabled) "
-                    "VALUES('research',1)"
-                )
+                    "UPDATE bot_profiles SET name=?,instructions=? WHERE id=?",
+                    (preset.name, newer_prompt, preset.id))
+    if not migrated:
+        with db:
+            db.execute(
+                "INSERT OR IGNORE INTO specialist_identity_migrations(key) "
+                "VALUES('anime_specialist_names_v1')")
     return added
