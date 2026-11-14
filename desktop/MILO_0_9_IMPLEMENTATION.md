@@ -2,7 +2,7 @@
 
 **Status:** working development branch and unsigned Windows installer PREVIEW.
 **Released baseline:** Milo 0.9.2 is available from GitHub Releases. This document
-covers Milo 0.9.6, built and released separately after its Windows CI checks.
+covers Milo 0.9.7, built and released separately after its Windows CI checks.
 **Branch:** feature/milo-09-desktop-awareness.
 **Draft PR:** https://github.com/BoomForge/colibri/pull/1
 
@@ -79,6 +79,31 @@ Windows CI covers typed-action planning, owner-approval refusal, mock app
 execution, exact file move preflight and validation, no-overwrite rename,
 document creation, app registry revocation, and frozen UI integration.
 Real window activation/Unicode typing still needs owner-machine validation.
+## Installed application discovery — Milo 0.9.7
+
+From Milo's own chat, enter `open Blender`, `open OBS`, `launch Firefox`,
+or `open VRoid Studio`. Milo now searches Windows App Paths entries,
+installed-program registry DisplayIcon targets, standard system Program Files
+directories and `%LOCALAPPDATA%\Programs` **without asking the owner to
+manually browse for an EXE first**. This is a read-only, bounded search in
+the background, not a whole-disk scan and not a shell/PowerShell invocation.
+
+Matches must be genuine existing `.exe` files. Shortcuts, scripts, hidden
+files, uninstallers, repairers and crash handlers are not launched. The
+candidate list is sorted; if multiple executables match, the owner selects
+one instead of Milo guessing. **Every launch** requires a second confirmation
+showing the complete executable path and its source. Immediately before
+launching, the file is rechecked for name, size and modification time.
+App discovery stores no blanket approval and cannot be triggered by content
+from documents, web pages or an LLM response. Failure to find a match is
+reported plainly; for Steam libraries on other drives or portable/custom
+installations, the existing Setup & modules → PC control → Add local
+application remains a manual fallback.
+
+Windows synthetic and native GUI CI tests cover app-name parsing,
+protected names, no shell execution, ambiguous matches, registry
+and directory sources, symlink refusal and explicit launch approval.
+End-to-end discovery on the owner's own installed programs is unverified.
 ## Implemented
 
 ### Windows system tray (0.9.3)
@@ -156,8 +181,8 @@ The unsigned 0.9 installer preview is produced by:
 https://github.com/BoomForge/colibri/actions/workflows/milo-09-preview-installer.yml
 
 Use the latest SUCCESSFUL run for this branch; open its Artifacts section and
-download **Milo-Installer-0.9.6-Preview**. Extract the artifact ZIP and run
-Milo-Setup-0.9.6.exe. Do not install if the run is failed or incomplete.
+download **Milo-Installer-0.9.7-Preview**. Extract the artifact ZIP and run
+Milo-Setup-0.9.7.exe. Do not install if the run is failed or incomplete.
 No external Ollama or vision weights are bundled in the Windows installer.
 Milo 0.9.2 remains available as the previous GitHub Release.
 
