@@ -625,7 +625,7 @@ class MiloDesktop:
             "Edit specialist bot" if existing else "Create specialist bot",
             "Each bot has its own instructions and optional model. "
             "Specialists do not automatically inherit Milo's private memories.")
-        panel.geometry("635x715")
+        panel.geometry("635x780")
         handle = tk.StringVar(value=existing.id if existing else "")
         display = tk.StringVar(value=existing.name if existing else "")
         enabled = tk.BooleanVar(value=existing.active if existing else True)
@@ -646,7 +646,7 @@ class MiloDesktop:
                  bg=PANEL, fg=MUTED, font=(FONT, 9)).pack(
                      anchor="w", padx=24, pady=(14, 4))
         instructions = tk.Text(
-            panel, height=10, wrap="word", bg=BG, fg=FG, insertbackground=FG,
+            panel, height=6, wrap="word", bg=BG, fg=FG, insertbackground=FG,
             font=(FONT, 10), padx=9, pady=8, relief="flat", bd=0)
         instructions.pack(fill="both", expand=True, padx=24)
         if existing:
@@ -685,6 +685,18 @@ class MiloDesktop:
                 messagebox.showerror("Bot avatar", str(exc)[:280], parent=panel)
         new_button(panel, "Choose avatar image", choose_avatar).pack(
             anchor="w", padx=24, pady=(7, 4))
+        permission = tk.BooleanVar(
+            value=web_enabled(self.db.db, existing.id) if existing else False)
+        tk.Checkbutton(
+            panel, text="Allow web research (each search needs confirmation)",
+            variable=permission, bg=PANEL, fg=FG, selectcolor=BG,
+            activebackground=PANEL, activeforeground=FG,
+            font=(FONT, 9)).pack(anchor="w", padx=24, pady=(8, 2))
+        if existing:
+            new_button(
+                panel, "Manage specialist documents",
+                lambda k=existing.id: self.documents_window(k)).pack(
+                    anchor="w", padx=24, pady=(4, 3))
         def save():
             try:
                 handle_id = handle.get().strip().lower()
@@ -696,6 +708,7 @@ class MiloDesktop:
                     handle_id, display.get().strip(), raw_instructions,
                     chosen_model, avatar_path[0], bool(enabled.get()))
                 save_bot(self.db.db, profile)
+                set_web_enabled(self.db.db, profile.id, permission.get())
                 panel.destroy()
                 self._refresh_bot_sidebar()
                 self._refresh_chat_context()
