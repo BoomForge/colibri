@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 jobs:
@@ -174,3 +174,24 @@ jobs:
             milo-modules.json
           retention-days: 30
           if-no-files-found: error
+      - name: Publish tested 0.9 release for in-app updater
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/milo-09-desktop-awareness'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tip = git ls-remote origin "refs/heads/$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tip)) { throw "Cannot verify branch" }
+          $tipSha = ($tip -split '\s+')[0].ToLowerInvariant()
+          if ($tipSha -ne $env:GITHUB_SHA.ToLowerInvariant()) { Write-Host "Stale build; skip publication"; exit 0 }
+          gh release view milo-v0.9.0 --repo BoomForge/colibri 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { Write-Host "Release already exists; leaving it unchanged"; exit 0 }
+          $exe = "Milo-Setup-0.9.0.exe"
+          if (!(Test-Path $exe)) { throw "Verified installer missing" }
+          $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
+          "$hash  $exe" | Set-Content Milo-0.9.0-SHA256.txt -Encoding ascii
+          $notes = "Milo 0.9.0 Windows preview: fixed right-click conversation delete, global quick chat, owner-approved screen capture, optional local vision and reviewed file operations. Unsigned pre-release. Verify hash and back up local Milo data and Models. SHA-256 installer: $hash. Source commit: $env:GITHUB_SHA."
+          gh release create milo-v0.9.0 $exe milo-modules.json milo-module-system_info-0.1.0.zip Milo-0.9.0-SHA256.txt --repo BoomForge/colibri --target "$env:GITHUB_SHA" --prerelease --title "Milo 0.9.0 Windows Preview" --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw "Release upload failed" }
+          gh release view milo-v0.9.0 --repo BoomForge/colibri --json tagName,assets,isDraft,isPrerelease
+          if ($LASTEXITCODE -ne 0) { throw "Cannot confirm release" }
