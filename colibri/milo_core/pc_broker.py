@@ -261,6 +261,12 @@ def visible_windows() -> list[tuple[int, str]]:
         raise PCActionError("Windows window control requires Windows")
     from ctypes import wintypes
     user32 = ctypes.windll.user32
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
     found: list[tuple[int, str]] = []
     callback_t = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
     def visit(hwnd, _param):
@@ -297,7 +303,13 @@ def _unique_window(title: str, *, enumerator=visible_windows) -> int:
 
 
 def _focus_hwnd(hwnd: int) -> None:
+    from ctypes import wintypes
     user32 = ctypes.windll.user32
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = wintypes.BOOL
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
     if not user32.IsWindow(hwnd):
         raise PCActionError("The target window is no longer available")
     user32.ShowWindow(hwnd, 9)  # SW_RESTORE
@@ -416,8 +428,12 @@ def execute_pc_plan(plan: PCPlan, *, approved: bool = False,
         value = plan.args[1]
         if not 0 < len(value) <= 500 or any(ord(c) < 32 for c in value):
             raise PCActionError("Typing request changed or contains control characters")
-        if windows is visible_windows and ctypes.windll.user32.GetForegroundWindow() != hwnd:
-            raise PCActionError("Target lost focus, so no text was typed")
+        if windows is visible_windows:
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            user32.GetForegroundWindow.restype = wintypes.HWND
+            if user32.GetForegroundWindow() != hwnd:
+                raise PCActionError("Target lost focus, so no text was typed")
         type_writer(value)
         return "Typed "+str(len(value))+" approved characters into the selected window."
     if kind == "rename_file":
@@ -431,7 +447,17 @@ def execute_pc_plan(plan: PCPlan, *, approved: bool = False,
         dest = src_root / dest_name
         if dest.exists() or dest.is_symlink():
             raise PCActionError("The destination already exists; nothing was overwritten")
-        os.rename(src, dest)  # Windows refuses overwrite; no external move.
+        # Link-then-unlink fails rather than clobbering an existing target,
+        # including on Unix during CI. Only same-directory regular files.
+        try:
+            os.link(src, dest, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise PCActionError("The destination appeared; no files were overwritten") from exc
+        try:
+            src.unlink()
+        except OSError as exc:
+            dest.unlink(missing_ok=True)
+            raise PCActionError("Source could not be removed; original remains") from exc
         return "Renamed "+old+" to "+dest_name+" in "+folder_name.title()+"."
     if kind == "create_note":
         folder_name, name, content = plan.args
