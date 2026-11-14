@@ -29,6 +29,10 @@ from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
 from colibri.milo_core.filesystem import find_files_by_prefix
 from colibri.milo_core.chat_files import parse_file_query, answer_file_query
+from colibri.milo_core.desktop_actions import (
+    parse_open_request, locate_file, validate_preview_path,
+)
+from desktop.file_viewer import open_preview
 from colibri.milo_core.model_catalog import (
     MODEL_PAGE, ModelDownloadError, inspect_abliterated_release,
     download_abliterated,
@@ -53,6 +57,7 @@ from colibri.milo_core.web_research import (
     ResearchError, init_web_prefs, web_enabled,
     set_web_enabled, wants_research, query_for_research,
     search_public_web, source_context, source_footer,
+    search_results_reply,
 )
 from colibri.milo_core.bots import (
     Bot, ChatSettings, attributed_messages, chat_settings,
@@ -340,6 +345,11 @@ class MiloDesktop:
         copy_chat.configure(bg=PANEL_BRIGHT, fg=MUTED,
                             padx=12, pady=6, font=(FONT, 9))
         copy_chat.pack(side="right", padx=(0, 2), pady=17)
+        select_text = new_button(
+            heading, "Select text", self.chat_view_selection)
+        select_text.configure(bg=PANEL_BRIGHT, fg=MUTED,
+                              padx=12, pady=6, font=(FONT, 9))
+        select_text.pack(side="right", padx=(0, 2), pady=17)
 
         model_strip = tk.Frame(main, bg=BG, height=37)
         model_strip.pack(fill="x", padx=18, pady=(8, 0))
@@ -368,6 +378,11 @@ class MiloDesktop:
         composer_border.pack(fill="x", padx=18, pady=(10, 5))
         composer = tk.Frame(composer_border, bg=PANEL)
         composer.pack(fill="both", expand=True, padx=1, pady=1)
+        browse = new_button(
+            composer, "＋ Open file", self.choose_local_file)
+        browse.configure(
+            bg=PANEL, fg=VIOLET, padx=9, pady=7, font=(FONT, 9))
+        browse.pack(side="left", padx=(6, 2), pady=7)
         self.entry = tk.Text(
             composer, height=2, wrap="word", font=(FONT, 11),
             bg=PANEL, fg=FG, insertbackground=VIOLET,
@@ -1066,6 +1081,54 @@ class MiloDesktop:
         new_button(panel, "Create conversation", create, primary=True).pack(
             fill="x", padx=24, pady=(18, 12))
 
+
+    def chat_view_selection(self):
+        """One continuous selectable text area spanning all visible messages."""
+        return self.chat_view.selectable_view()
+
+    def choose_local_file(self):
+        """Explicit file picker; preview doesn't require LLM inference."""
+        name = filedialog.askopenfilename(
+            title="Open a local image or document in Milo",
+            filetypes=[
+                ("Images and documents",
+                 "*.png *.jpg *.jpeg *.webp *.gif *.bmp *.pdf *.docx "
+                 "*.txt *.md *.markdown *.rst *.csv *.json *.py *.js *.ts "
+                 "*.yaml *.yml *.log *.html *.htm"),
+                ("All files", "*.*"),
+            ], parent=self.root)
+        if name:
+            try:
+                return open_preview(self.root, validate_preview_path(Path(name)))
+            except (OSError, ValueError) as exc:
+                messagebox.showerror(
+                    "Milo file preview", str(exc)[:300], parent=self.root)
+
+    def _begin_tool_turn(self, chat_id, prompt, target_id, author_name, avatar):
+        """Show deterministic tool activity with the correct real bot identity."""
+        self.entry.delete("1.0", "end")
+        self.entry_placeholder = False
+        self.entry.configure(fg=FG)
+        self._display_turn("user", prompt, datetime.now().astimezone())
+        self.pending_message = self.chat_view.add_message(
+            "assistant", "", datetime.now().astimezone(),
+            streaming=True, author_id=target_id,
+            author_name=author_name, avatar=avatar)
+        self.cancel.clear()
+        self._set_busy(True)
+
+    @staticmethod
+    def _save_direct_turn(chat_id, prompt, reply, target_id, author_name, avatar_name,
+                          shared_room):
+        from colibri.milo_core.bots import append_attributed_turn
+        with LocalMemoryStore(DB_PATH) as store:
+            if target_id != "milo" or shared_room:
+                append_attributed_turn(
+                    store.db, chat_id, prompt, reply,
+                    bot_id=target_id, bot_name=author_name,
+                    avatar=avatar_name)
+            else:
+                store.append_turn(chat_id, prompt, reply)
 
     def send(self):
         if self.busy:
