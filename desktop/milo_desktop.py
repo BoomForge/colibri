@@ -529,6 +529,96 @@ class MiloDesktop:
             image.save(destination, format="PNG", optimize=True)
         return name
 
+    def documents_window(self, scope="core"):
+        """Add/remove owner-selected reference files; never upload to a server."""
+        if scope != "core" and get_bot(self.db.db, scope) is None:
+            messagebox.showerror(
+                "Documents", "Save the specialist bot before attaching documents.")
+            return None
+        title = ("Core Knowledge" if scope == "core" else
+                 "Documents · @" + scope)
+        window = self._panel(
+            title,
+            "Core documents are accessible to every bot. Specialist documents "
+            "are visible only to their named bot. Files and extracted text stay "
+            "on this computer; web research never uploads them.")
+        window.geometry("710x570")
+        tk.Label(
+            window, text="Supported: PDF, DOCX, TXT, MD, CSV, JSON, code, HTML",
+            bg=PANEL, fg=MUTED, font=(FONT, 9)).pack(
+                anchor="w", padx=24, pady=(9, 7))
+        listing = tk.Listbox(
+            window, bg=BG, fg=FG, selectbackground=EDGE,
+            selectforeground=FG, borderwidth=0, highlightthickness=0,
+            font=(FONT, 10), exportselection=False)
+        listing.pack(fill="both", expand=True, padx=24, pady=(0, 8))
+        current_ids = []
+        status = tk.Label(
+            window, text="", bg=PANEL, fg=MUTED, font=(FONT, 9),
+            wraplength=650, justify="left")
+        status.pack(anchor="w", padx=24, pady=(4, 9))
+
+        def refresh():
+            records = list_documents(self.db.db, scope)
+            listing.delete(0, "end")
+            current_ids.clear()
+            for record in records:
+                current_ids.append(record["id"])
+                listing.insert(
+                    "end", record["name"] + "  ·  " +
+                    str(record["chars"]) + " searchable characters")
+            status.configure(text=str(len(records)) +
+                             " documents · local copy and extracted text retained")
+
+        def add():
+            paths = filedialog.askopenfilenames(
+                parent=window, title="Import reference documents",
+                filetypes=[("Documents",
+                            "*.pdf *.docx *.txt *.md *.markdown *.csv *.json "
+                            "*.py *.js *.ts *.yaml *.yml *.rst *.log *.html *.htm"),
+                           ("All files", "*.*")])
+            if not paths:
+                return
+            successes = 0
+            failed = []
+            for name in paths:
+                try:
+                    import_document(self.db.db, DOCUMENTS, Path(name), scope)
+                    successes += 1
+                except (OSError, ValueError) as exc:
+                    failed.append(Path(name).name + ": " + str(exc)[:110])
+            refresh()
+            if failed:
+                messagebox.showwarning(
+                    "Documents",
+                    f"Imported {successes} document(s).\n\n" +
+                    "\n".join(failed[:8]), parent=window)
+
+        def remove():
+            selection = listing.curselection()
+            if not selection:
+                return
+            ident = current_ids[selection[0]]
+            if not messagebox.askyesno(
+                "Remove document",
+                "Remove this local document from " + title +
+                " and stop using it for retrieval?",
+                parent=window):
+                return
+            try:
+                remove_document(self.db.db, DOCUMENTS, ident, scope)
+                refresh()
+            except (OSError, ValueError) as exc:
+                messagebox.showerror(
+                    "Remove document", str(exc)[:220], parent=window)
+        actions = tk.Frame(window, bg=PANEL)
+        actions.pack(fill="x", padx=24, pady=(0, 18))
+        new_button(actions, "＋  Add documents", add, primary=True).pack(
+            side="left", padx=(0, 9))
+        new_button(actions, "Remove selected", remove).pack(side="left")
+        refresh()
+        return window
+
     def _edit_bot_window(self, bot_id=None):
         existing = get_bot(self.db.db, bot_id) if bot_id else None
         panel = self._panel(
