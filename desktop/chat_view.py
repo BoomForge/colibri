@@ -257,7 +257,8 @@ class ChatView(tk.Frame):
         grouped = should_group(self._previous_role, self._previous_time, role, date)
         row = tk.Frame(self.inner, bg=self.bg_color)
         row.pack(fill="x", padx=(21, 24), pady=(3, 2) if grouped else (10, 3))
-        column = tk.Frame(row, bg=self.bg_color, width=43)
+        column = tk.Frame(row, bg=self.bg_color, width=43,
+                          height=42 if not grouped else 6)
         column.pack(side="left", anchor="n", padx=(0, 13))
         column.pack_propagate(False)
         if not grouped:
