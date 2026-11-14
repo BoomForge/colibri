@@ -78,5 +78,31 @@ class HotkeyTests(unittest.TestCase):
         hotkey.stop()
 
 
+class MemoryCorrectionTests(unittest.TestCase):
+    def test_correction_requires_approval_and_preserves_original_provenance(self):
+        from colibri.milo_core.store import LocalMemoryStore
+        with tempfile.TemporaryDirectory() as folder:
+            with LocalMemoryStore(Path(folder) / "private.sqlite") as store:
+                note_id = store.add_approved_note(
+                    "Original preference", source_kind="owner_approved",
+                    source_ref="desktop:initial", approved=True)
+                with self.assertRaises(PermissionError):
+                    store.revise_note(note_id, "Revised preference")
+                self.assertTrue(store.revise_note(
+                    note_id, "Revised preference", approved=True))
+                note = store.note_provenance(note_id)
+                self.assertEqual(note["text"], "Revised preference")
+                self.assertEqual(note["source_kind"], "owner_corrected")
+                self.assertEqual(note["original_source_kind"], "owner_approved")
+                self.assertEqual(note["original_source_ref"], "desktop:initial")
+                self.assertEqual(note["revision_count"], 1)
+                self.assertFalse(store.revise_note(
+                    note_id, "Revised preference", approved=True))
+                self.assertEqual(store.find_notes("Revised")[0].id, note_id)
+                self.assertTrue(store.delete_note(note_id))
+                self.assertEqual(store.db.execute(
+                    "SELECT COUNT(*) FROM approved_note_edits").fetchone()[0], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
