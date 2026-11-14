@@ -2,9 +2,33 @@
 
 **Status:** working development branch and unsigned Windows installer PREVIEW.
 **Released baseline:** Milo 0.9.2 is available from GitHub Releases. This document
-covers Milo 0.9.3, built and released separately after its Windows CI checks.
+covers Milo 0.9.4, built and released separately after its Windows CI checks.
 **Branch:** feature/milo-09-desktop-awareness.
 **Draft PR:** https://github.com/BoomForge/colibri/pull/1
+
+## Install/update behaviour — 0.9.4
+
+- **Automatic restart:** A normal interactive Windows install of Milo 0.9.4
+  opens the newly installed Milo executable automatically after the files,
+  shortcuts and version metadata finish installing. No extra launch button
+  or manual Start menu action is required.
+- **Safe in-app upgrade:** After the owner approves a verified update, Milo
+  passes its own Windows PID to the installer, shuts down the local model,
+  tray service and database, then the installer waits for the old process
+  to exit (up to 120 seconds) before replacing its installed program files.
+  A failed wait aborts the installation rather than overwriting running
+  binaries. The installer then reopens Milo.
+- **Upgrading from 0.9.3:** Older clients cannot pass their PID; the new
+  interactive installer includes a short grace period for their shutdown.
+  Manual installers should be run after choosing **Close Milo** in its tray
+  menu to avoid a running copy during replacement.
+- **Unattended safety:** Silent /S installation does not launch Milo and
+  the uninstaller never opens the app. Windows CI covers silent install
+  no-restart, a controlled PID wait, and preserving installed Models.
+- **What is still unverified:** Windows automation validates the installer,
+  compile and PID wait but does not exercise a real desktop installer GUI
+  launch on the owner's PC. If Windows blocks the unsigned installer or
+  app, reopening may require owner action.
 
 ## Implemented
 
@@ -83,8 +107,8 @@ The unsigned 0.9 installer preview is produced by:
 https://github.com/BoomForge/colibri/actions/workflows/milo-09-preview-installer.yml
 
 Use the latest SUCCESSFUL run for this branch; open its Artifacts section and
-download **Milo-Installer-0.9.3-Preview**. Extract the artifact ZIP and run
-Milo-Setup-0.9.3.exe. Do not install if the run is failed or incomplete.
+download **Milo-Installer-0.9.4-Preview**. Extract the artifact ZIP and run
+Milo-Setup-0.9.4.exe. Do not install if the run is failed or incomplete.
 No external Ollama or vision weights are bundled in the Windows installer.
 Milo 0.9.2 remains available as the previous GitHub Release.
 
