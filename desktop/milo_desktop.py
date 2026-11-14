@@ -1642,10 +1642,14 @@ def ui_self_test() -> int:
             app.updates_modules_window()
             mark("after tool windows")
             app.chat_view.clear()
+            mark("after clear")
             at = datetime.now().astimezone()
             app.chat_view.add_message("user", "First UI test message", at)
+            mark("after first")
             second = app.chat_view.add_message("user", "Grouped follow-up", at)
+            mark("after second")
             reply = app.chat_view.add_message("assistant", "", at, streaming=True)
+            mark("after reply shell")
             app.chat_view.append_to(reply, "Hello from compact Milo chat")
             app.chat_view.finish(reply)
             mark("after messages")
@@ -1661,6 +1665,11 @@ def ui_self_test() -> int:
             for child in list(root.winfo_children()):
                 if isinstance(child, tk.Toplevel):
                     child.destroy()
+        except Exception:
+            import traceback
+            traceback.print_exc(file=report)
+            report.flush()
+            return 1  # fail cleanly; PyInstaller --windowed must not display a modal
         finally:
             mark("before close")
             app._close()
