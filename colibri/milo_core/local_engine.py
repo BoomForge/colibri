@@ -68,7 +68,7 @@ def model_valid(path: Path) -> bool:
     try:
         import json
         obj = json.loads(pointer.read_text(encoding="utf-8"))
-        source = obj.get("source")
+        source = obj.get("gguf")
         if not isinstance(source, str) or not source:
             return False
         file = Path(source)
