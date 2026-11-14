@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tkinter as tk
+from desktop.rich_text import RichMessage
 
 try:
     from PIL import Image, ImageDraw, ImageTk
@@ -204,7 +205,7 @@ class ChatView(tk.Frame):
         if abs(new_width - self._wrap_width) > 6:
             self._wrap_width = new_width
             for message in self.messages:
-                message["body"].configure(wraplength=new_width)
+                message["body"].set_wrap_width(new_width)
 
     def _scroll_bottom(self):
         self._queued_scroll = False
@@ -294,11 +295,10 @@ class ChatView(tk.Frame):
             badge.pack(side="left", padx=(0, 8))
             tk.Label(header, text=natural_time(date), bg=self.bg_color,
                      fg=COLORS["muted"], font=(FONT, 8)).pack(side="left")
-        body = tk.Label(content_col, text=content, bg=self.bg_color,
-                        fg=COLORS["text"], font=(FONT, 10),
-                        anchor="nw", justify="left", wraplength=self._wrap_width,
-                        pady=0, padx=0)
+        body = RichMessage(
+            content_col, width=self._wrap_width, background=self.bg_color)
         body.pack(fill="x", anchor="w")
+        body.render(content)
         message = {"role": role, "date": date, "body": body, "row": row,
                    "content": content, "grouped": grouped, "streaming": streaming}
         self.messages.append(message)
@@ -329,7 +329,7 @@ class ChatView(tk.Frame):
             return
         follow = self._near_bottom()
         message["content"] += addition
-        message["body"].configure(text=message["content"])
+        message["body"].render(message["content"])
         self._maybe_follow(always=follow)
 
     def finish(self, message: dict, *, status: str | None = None):
@@ -337,8 +337,7 @@ class ChatView(tk.Frame):
         if status:
             suffix = "\n" + status
             message["content"] += suffix
-            message["body"].configure(text=message["content"],
-                                       fg=COLORS["muted"])
+            message["body"].render(message["content"])
         self._maybe_follow(always=True)
 
 
