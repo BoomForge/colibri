@@ -23,7 +23,7 @@ import uuid
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from desktop.chat_view import ChatView, ConversationList, COLORS
+from desktop.chat_view import ChatView, ConversationList, COLORS, avatar_widget, AvatarBank
 
 from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
@@ -45,6 +45,11 @@ from colibri.milo_core.legacy_archive import (
 from colibri.milo_core.portable_backup import BackupError, export_bundle, import_bundle
 from colibri.milo_core.provider import LocalOpenAIProvider, ProviderError
 from colibri.milo_core.store import LocalMemoryStore
+from colibri.milo_core.bots import (
+    Bot, ChatSettings, attributed_messages, chat_settings,
+    get_bot, init_bot_schema, list_bots, model_for_turn,
+    resolve_target, save_bot, set_bot_active, set_chat_settings,
+)
 from colibri.milo_core.updates import (
     CURRENT_VERSION, UpdateError, latest_milo_release,
     release_version, installer_asset, newer, download_verified,
@@ -167,8 +172,8 @@ class MiloDesktop:
                 self.root.iconphoto(True, tk.PhotoImage(file=str(BRAND_AVATAR)))
         except tk.TclError:
             pass
-        self.root.geometry("1180x780")
-        self.root.minsize(860, 580)
+        self.root.geometry("1280x810")
+        self.root.minsize(1040, 620)
         self.root.configure(bg=BG)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         AVATARS.mkdir(parents=True, exist_ok=True)
@@ -183,6 +188,10 @@ class MiloDesktop:
         # All managed model weights live under the named Models directory.
         self.config["model_directory"] = str(self.models_root)
         self.db = LocalMemoryStore(DB_PATH)
+        init_bot_schema(self.db.db)
+        self.active_model_location = ""
+        self.loading_model_location = ""
+        self.pending_send = None
         self.events: queue.Queue[tuple] = queue.Queue()
         self.busy = False
         self.cancel = threading.Event()
@@ -197,10 +206,12 @@ class MiloDesktop:
         self.pending_message = None
         self._build()
         self._refresh_profile()
+        self._autoselect_local_model()
+        self._refresh_bot_sidebar()
         self._refresh_chat_list()
         self._load_chat()
-        self._autoselect_local_model()
-        self.check_connection()
+        self._refresh_chat_context()
+        self._ensure_chat_model()
         self.root.after(70, self._pump)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
@@ -277,6 +288,14 @@ class MiloDesktop:
         tk.Label(self.profile_row, text="Local profile", bg=PANEL, fg=MUTED,
                  font=(FONT, 8)).pack(anchor="w", pady=(0, 9))
 
+        # Reserve the members panel before packing the expandable chat region.
+        self.bot_side = tk.Frame(
+            self.root, bg=SIDEBAR, width=225,
+            highlightthickness=1, highlightbackground=EDGE)
+        self.bot_side.pack(side="right", fill="y")
+        self.bot_side.pack_propagate(False)
+        self._build_bot_sidebar()
+
         main = tk.Frame(self.root, bg=BG)
         main.pack(side="left", fill="both", expand=True)
 
@@ -308,6 +327,24 @@ class MiloDesktop:
         copy_chat.configure(bg=PANEL_BRIGHT, fg=MUTED,
                             padx=12, pady=6, font=(FONT, 9))
         copy_chat.pack(side="right", padx=(0, 2), pady=17)
+
+        model_strip = tk.Frame(main, bg=BG, height=37)
+        model_strip.pack(fill="x", padx=18, pady=(8, 0))
+        self.channel_label = tk.Label(
+            model_strip, text="MILO · SHARED CHAT", bg=BG, fg=MUTED,
+            font=(FONT, 8, "bold"))
+        self.channel_label.pack(side="left", padx=(1, 8))
+        tk.Label(model_strip, text="MODEL", bg=BG, fg=MUTED,
+                 font=(FONT, 8)).pack(side="left", padx=(8, 7))
+        self.chat_model_var = tk.StringVar(value="Loading models...")
+        self.model_selector = ttk.Combobox(
+            model_strip, textvariable=self.chat_model_var, width=29,
+            state="readonly", font=(FONT, 9), exportselection=False)
+        self.model_selector.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.model_selector.bind("<<ComboboxSelected>>", self._select_chat_model)
+        self.chat_model_hint = tk.Label(
+            model_strip, text="", bg=BG, fg=MUTED, font=(FONT, 8))
+        self.chat_model_hint.pack(side="right")
 
         # Compact, avatar-led DM timeline. View-only; conversation logic
         # remains in the original MiloConversation and SQLite store.
