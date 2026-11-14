@@ -37,7 +37,7 @@ class DesktopWorkflowTests(unittest.TestCase):
     def test_default_specialists_seed_once_without_replacing_user_edits(self):
         count = ensure_specialists(self.db, self.root / "Models")
         self.assertEqual(count, ["research", "webdev", "gamedev"])
-        self.assertEqual(get_bot(self.db, "research").name, "Research")
+        self.assertEqual(get_bot(self.db, "research").name, "Sage")
         self.assertTrue("Harvard" in get_bot(self.db, "research").instructions)
         self.assertTrue("HTML/CSS" in get_bot(self.db, "webdev").instructions)
         self.assertTrue("Blender" in get_bot(self.db, "gamedev").instructions)
