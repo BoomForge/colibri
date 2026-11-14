@@ -127,6 +127,7 @@ DEFAULTS = {
     "model_directory": "",
     "model_location": "",
     "backend": "vulkan",
+    "global_shortcut": "on",
 }
 
 
@@ -267,7 +268,8 @@ class MiloDesktop:
         self._ensure_chat_model()
         self.root.after(70, self._pump)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
-        if "--ui-self-test" not in sys.argv:
+        if ("--ui-self-test" not in sys.argv
+                and self.config.get("global_shortcut") == "on"):
             self.quick_hotkey.start()
 
     def _build(self):
@@ -2905,6 +2907,13 @@ class MiloDesktop:
             tk.Label(panel, text="Detected models: " + ", ".join(self.models[:4]),
                      bg=PANEL, fg=MUTED, wraplength=475).pack(
                          padx=24, pady=7, anchor="w")
+        shortcut_enabled = tk.BooleanVar(
+            value=self.config.get("global_shortcut", "on") == "on")
+        tk.Checkbutton(
+            panel, text="Enable global Ctrl+Shift+M quick-chat shortcut",
+            variable=shortcut_enabled, bg=PANEL, fg=FG, selectcolor=BG,
+            activebackground=PANEL, activeforeground=FG,
+            font=(FONT, 9)).pack(anchor="w", padx=24, pady=(12, 5))
         avatars = tk.Frame(panel, bg=PANEL)
         avatars.pack(fill="x", padx=24, pady=15)
         new_button(avatars, "Change your avatar (PNG/GIF)",
@@ -2926,8 +2935,16 @@ class MiloDesktop:
                                      parent=panel)
                 return
             next_config["model_directory"] = str(self.models_root)
+            previous_shortcut = self.config.get("global_shortcut", "on")
+            next_config["global_shortcut"] = (
+                "on" if shortcut_enabled.get() else "off")
             self.config = next_config
             save_config(self.config)
+            if previous_shortcut != next_config["global_shortcut"]:
+                self.quick_hotkey.stop()
+                self.quick_hotkey = GlobalQuickChatHotkey(self.events)
+                if next_config["global_shortcut"] == "on":
+                    self.quick_hotkey.start()
             self._refresh_profile()
             self._load_chat()
             panel.destroy()
