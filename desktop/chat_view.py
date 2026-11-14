@@ -494,7 +494,9 @@ class ConversationList(tk.Frame):
         self.avatar = path
         self.avatars = AvatarBank()
 
-    def set_chats(self, chats, selected):
+    def set_chats(self, chats, selected, avatar_by_chat=None):
+        """Each private DM may display a different specialist portrait."""
+        avatar_by_chat = avatar_by_chat or {}
         for widget in self.inner.winfo_children():
             widget.destroy()
         self.rows = {}
@@ -505,7 +507,9 @@ class ConversationList(tk.Frame):
             row.pack(fill="x", padx=(7, 6), pady=2)
             tk.Frame(row, bg=COLORS["milo"] if active else bg,
                      width=3).pack(side="left", fill="y")
-            image = avatar_widget(row, self.avatars, self.avatar, "M",
+            portrait = avatar_by_chat.get(chat_id) or self.avatar
+            fallback = (title.lstrip("#@ ").strip() or "M")[:1].upper()
+            image = avatar_widget(row, self.avatars, portrait, fallback,
                                   COLORS["milo"], size=28, background=bg)
             image.pack(side="left", padx=(8, 9), pady=7)
             clean_title = title.strip().replace("\n", " ")
