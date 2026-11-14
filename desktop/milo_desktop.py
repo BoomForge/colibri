@@ -597,8 +597,10 @@ class MiloDesktop:
         if chat_settings(self.db.db, self.current_chat).kind == "room":
             return
         rows = self.db.db.execute(
-            "SELECT chat_id FROM chat_settings WHERE kind='room' "
-            "ORDER BY rowid DESC LIMIT 1").fetchall()
+            "SELECT c.chat_id FROM conversations c "
+            "LEFT JOIN chat_settings s ON c.chat_id=s.chat_id "
+            "WHERE s.chat_id IS NULL OR s.kind='room' "
+            "GROUP BY c.chat_id ORDER BY MAX(c.id) DESC LIMIT 1").fetchall()
         if rows:
             self._select_chat(rows[0][0])
         else:
@@ -795,13 +797,21 @@ class MiloDesktop:
         self.pending_message = None
         rows = attributed_messages(self.db.db, self.current_chat, limit=1000)
         if not rows:
-            archive_notice = (
-                "The original Milo conversation archive is available for "
-                "evidence-backed recall.\n"
-                if loaded_persona(self.db.db) is not None else
-                "Your original Milo personality has not been imported yet. "
-                "Choose Restore Milo personality in the sidebar.\n"
-            )
+            chat_mode = chat_settings(self.db.db, self.current_chat)
+            if chat_mode.kind == "private" and chat_mode.bot_id != "milo":
+                archive_notice = (
+                    "Private chat with @" + chat_mode.bot_id + ". "
+                    "This specialist does not inherit Milo's archived "
+                    "relationship memories or private memory notes.\n"
+                )
+            else:
+                archive_notice = (
+                    "The original Milo conversation archive is available for "
+                    "evidence-backed recall.\n"
+                    if loaded_persona(self.db.db) is not None else
+                    "Your original Milo personality has not been imported yet. "
+                    "Choose Restore Milo personality in the sidebar.\n"
+                )
             self._append(
                 "This conversation is stored only on your computer.\n"
                 + archive_notice + "Start a message below.", "notice"
@@ -850,21 +860,18 @@ class MiloDesktop:
             self._ensure_chat_model()
 
     def copy_conversation(self):
-        """Copy the complete locally stored transcript without contacting a model."""
+        """Copy complete transcript with author attribution, without a model call."""
         try:
-            rows = self.db.db.execute(
-                "SELECT role,content,created_at FROM conversations "
-                "WHERE chat_id=? ORDER BY id LIMIT 5000",
-                (self.current_chat,)
-            ).fetchall()
+            rows = attributed_messages(self.db.db, self.current_chat, limit=5000)
             if not rows:
-                messagebox.showinfo("Copy chat", "This conversation has no saved messages yet.")
+                messagebox.showinfo(
+                    "Copy chat", "This conversation has no saved messages yet.")
                 return
             lines = []
-            for role, text, date in rows:
+            for role, content, date, bot_id, bot_name, _avatar in rows:
                 speaker = (self.config.get("user_name", "You")
-                           if role == "user" else self.config.get("milo_name", "Milo"))
-                lines.append(f"{speaker} ({date}):\n{text}")
+                           if role == "user" else bot_name)
+                lines.append(f"{speaker} ({date}):\n{content}")
             transcript = "\n\n".join(lines)
             if len(transcript) > 2_000_000:
                 messagebox.showerror(
@@ -900,7 +907,10 @@ class MiloDesktop:
                  font=(FONT, 10)).pack(anchor="w", padx=24, pady=(17, 6))
         paths = self._installed_model_choices()
         labels = ["Auto · use bot / Milo default"] + paths
-        model_var = tk.StringVar(value=paths[0] if paths else labels[0])
+        configured = self.config.get("model_location", "")
+        model_var = tk.StringVar(value=(
+            configured if configured in paths else
+            paths[0] if paths else labels[0]))
         model_chooser = ttk.Combobox(
             panel, textvariable=model_var,
             values=labels, state="readonly" if paths else "disabled",
