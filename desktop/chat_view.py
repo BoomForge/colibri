@@ -209,7 +209,8 @@ class ChatView(tk.Frame):
     def _scroll_bottom(self):
         self._queued_scroll = False
         if self.canvas.winfo_exists():
-            self.canvas.update_idletasks()
+            # Never call update_idletasks() from an idle callback: it can
+            # recursively drive Tk geometry and wedge a windowed build.
             self.canvas.yview_moveto(1.0)
 
     def _near_bottom(self) -> bool:
