@@ -66,7 +66,8 @@ class ModelFoldersTest(unittest.TestCase):
                 '"gguf":' + __import__("json").dumps(str(gguf)) + '}',
                 encoding="utf-8")
             self.assertTrue(model_valid(sidecar))
-            self.assertEqual(discover_models(root), [sidecar])
+            self.assertEqual(len(discover_models(root)), 1)
+            self.assertTrue(discover_models(root)[0].samefile(sidecar))
 
     def test_missing_engine_is_not_started(self):
         with tempfile.TemporaryDirectory() as tmp:
