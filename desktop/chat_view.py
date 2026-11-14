@@ -158,6 +158,7 @@ class ChatView(tk.Frame):
         self.names = {"user": "You", "assistant": "Milo"}
         self.paths = {"user": None, "assistant": None}
         self._previous_role = None
+        self._previous_sender = None
         self._previous_time = None
         self._previous_day = None
         self.messages = []
@@ -236,6 +237,7 @@ class ChatView(tk.Frame):
             child.destroy()
         self.messages.clear()
         self._previous_day = self._previous_role = self._previous_time = None
+        self._previous_sender = None
         self._maybe_follow(always=True)
 
     def notice(self, content: str):
@@ -257,14 +259,21 @@ class ChatView(tk.Frame):
             side="left", fill="x", expand=True, pady=(9, 0))
 
     def add_message(self, role: str, content: str, timestamp=None, *,
-                    streaming=False):
+                    streaming=False, author_id: str | None = None,
+                    author_name: str | None = None, avatar=None):
         if role not in {"assistant", "user"}:
             raise ValueError("invalid chat role")
         date = parse_timestamp(timestamp)
         day = date.date()
+        sender = ("user" if role == "user" else author_id or "milo")
+        display = self.names[role] if role == "user" else (
+            author_name or self.names[role])
+        image_path = (self.paths["user"] if role == "user" else
+                      avatar if avatar is not None else self.paths["assistant"])
         if day != self._previous_day:
             self._separator(date)
-        grouped = should_group(self._previous_role, self._previous_time, role, date)
+        grouped = (self._previous_sender == sender and
+                   should_group(self._previous_role, self._previous_time, role, date))
         row = tk.Frame(self.inner, bg=self.bg_color)
         row.pack(fill="x", padx=(21, 24), pady=(3, 2) if grouped else (10, 3))
         column = tk.Frame(row, bg=self.bg_color, width=43,
@@ -273,7 +282,7 @@ class ChatView(tk.Frame):
         column.pack_propagate(False)
         if not grouped:
             portrait = avatar_widget(column, self.avatars,
-                                     self.paths[role], self.names[role],
+                                     image_path, display,
                                      COLORS["milo" if role == "assistant" else "user"],
                                      size=39, background=self.bg_color)
             portrait.pack(anchor="n", pady=(1, 0))
@@ -284,7 +293,7 @@ class ChatView(tk.Frame):
         if not grouped:
             header = tk.Frame(content_col, bg=self.bg_color)
             header.pack(fill="x", anchor="w", pady=(0, 2))
-            who = tk.Label(header, text=self.names[role], bg=self.bg_color,
+            who = tk.Label(header, text=display, bg=self.bg_color,
                            fg=COLORS["milo" if role == "assistant" else "user"],
                            font=(FONT, 10, "bold"))
             who.pack(side="left", padx=(0, 7))
@@ -300,11 +309,14 @@ class ChatView(tk.Frame):
         body.pack(fill="x", anchor="w")
         body.render(content)
         message = {"role": role, "date": date, "body": body, "row": row,
-                   "content": content, "grouped": grouped, "streaming": streaming}
+                   "content": content, "grouped": grouped,
+                   "author_id": sender, "author_name": display,
+                   "streaming": streaming}
         self.messages.append(message)
         for widget in [body, content_col, row]:
             widget.bind("<Button-3>", lambda event, msg=message: self._copy_menu(event, msg))
         self._previous_role = role
+        self._previous_sender = sender
         self._previous_day = day
         self._previous_time = date
         self._maybe_follow(always=True)
