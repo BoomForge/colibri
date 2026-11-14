@@ -72,6 +72,9 @@ class GlobalQuickChatHotkey:
             user32.UnregisterHotKey(None, HOTKEY_ID)
 
     def stop(self) -> None:
+        if self._thread is None:
+            self._stop.set()
+            return
         self._stop.set()
         self._ready.wait(timeout=1.5)
         if self._thread_id is not None and sys.platform == "win32":
