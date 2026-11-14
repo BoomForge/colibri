@@ -1,9 +1,10 @@
 ; Milo Windows installer. Per-user, preserve Models and private data on upgrade.
 Unicode True
 !include "MUI2.nsh"
+!include "FileFunc.nsh"
 
 !define PRODUCT "Milo"
-!define VERSION "0.9.3"
+!define VERSION "0.9.4"
 !define COMPANY "Pixelwolf"
 !define REG "Software\Microsoft\Windows\CurrentVersion\Uninstall\PixelwolfMilo"
 !define MUI_ICON "..\assets\Milo.ico"
@@ -27,6 +28,32 @@ BrandingText "Milo — Local Personal Assistant"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 
+; From the in-app updater, /WAITFORPID=<old-Milo-PID> prevents overwriting
+; a running exe/DLL while its model and SQLite store are shutting down.
+; The previous 0.9.3 updater cannot pass this yet, so an interactive setup
+; also gets a short grace period before replacing program files.
+Function .onInit
+    ${GetParameters} $R0
+    ClearErrors
+    ${GetOptions} $R0 "/WAITFORPID=" $R1
+    IfErrors no_wait
+    StrCmp $R1 "" no_wait
+    System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i $R1) p .r1'
+    StrCmp $1 0 no_wait
+    DetailPrint "Waiting for the previous Milo process to close..."
+    System::Call 'kernel32::WaitForSingleObject(p r1, i 120000) i .r2'
+    System::Call 'kernel32::CloseHandle(p r1)'
+    StrCmp $2 0 done_wait
+    MessageBox MB_ICONSTOP|MB_OK "Milo is still running. Right-click its tray icon and choose Close Milo before reinstalling."
+    Abort
+no_wait:
+    ; This also covers upgrades launched by Milo 0.9.3, which did not yet
+    ; pass a PID. Silent CI installs and uninstallers never wait or relaunch.
+    IfSilent done_wait
+    Sleep 2000
+done_wait:
+FunctionEnd
+
 Section "Install Milo" SEC_MAIN
     SetShellVarContext current
     SetOutPath "$INSTDIR"
@@ -48,6 +75,13 @@ Section "Install Milo" SEC_MAIN
     WriteRegStr HKCU "${REG}" "QuietUninstallString" '"$INSTDIR\Uninstall.exe" /S'
     WriteRegDWORD HKCU "${REG}" "NoModify" 1
     WriteRegDWORD HKCU "${REG}" "NoRepair" 1
+
+    ; Restart automatically AFTER copying the updated application. The
+    ; /S installer used by Windows CI/deployment never starts interactive Milo.
+    ; Uninstall has its own section and never launches the program.
+    IfSilent skip_launch
+    Exec '"$INSTDIR\\Milo.exe"'
+skip_launch:
 SectionEnd
 
 Section "Uninstall"
