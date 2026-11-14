@@ -4,7 +4,7 @@ Unicode True
 !include "FileFunc.nsh"
 
 !define PRODUCT "Milo"
-!define VERSION "0.9.6"
+!define VERSION "0.9.7"
 !define COMPANY "Pixelwolf"
 !define REG "Software\Microsoft\Windows\CurrentVersion\Uninstall\PixelwolfMilo"
 !define MUI_ICON "..\assets\Milo.ico"
