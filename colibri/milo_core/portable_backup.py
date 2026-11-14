@@ -11,6 +11,7 @@ directory; source SHA-256 checks and symlink/directory escape rejection.
 """
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -125,8 +126,10 @@ def _snapshot_sqlite(source: Path, destination: Path) -> None:
     # committed writes from a live WAL database.
     try:
         uri = source.resolve(strict=True).as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True) as conn:
-            with sqlite3.connect(destination) as snapshot:
+        # SQLite connection context managers commit, but do not CLOSE handles.
+        # Explicit closing is essential before Windows can remove temp files.
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            with closing(sqlite3.connect(destination)) as snapshot:
                 conn.backup(snapshot)
     except sqlite3.Error as exc:
         raise BackupError("could not snapshot SQLite memory") from exc
