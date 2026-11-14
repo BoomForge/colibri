@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import queue
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -553,8 +554,15 @@ class MiloDesktop:
         try:
             ORIGINAL_ARCHIVES.mkdir(parents=True, exist_ok=True)
             source_path = Path(source)
+            # Name the retained file by the ENTIRE selected package digest,
+            # not only chat.json. Distinct personal profile revisions sharing
+            # the same chat export must not silently resolve to stale files.
+            with source_path.open("rb") as handle:
+                package_hash = hashlib.sha256()
+                for part in iter(lambda: handle.read(1024 * 1024), b""):
+                    package_hash.update(part)
             archive_path = ORIGINAL_ARCHIVES / (
-                "milo-original-" + preview.source_sha256[:20]
+                "milo-original-" + package_hash.hexdigest()[:20]
                 + source_path.suffix.lower()
             )
             if not archive_path.exists():
