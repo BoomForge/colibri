@@ -1435,6 +1435,7 @@ class MiloDesktop:
 
     def _capture_screen_after_hiding(self):
         image_path = None
+        failure = None
         try:
             image_path = capture_primary_screen(DATA_DIR / "captures")
             self._queue_attachments([image_path])
@@ -1444,11 +1445,13 @@ class MiloDesktop:
             if image_path is not None:
                 image_path.unlink(missing_ok=True)
             self._audit("screen_capture", "failed")
-            messagebox.showerror("Screen capture", str(exc)[:260],
-                                 parent=self.root)
+            failure = str(exc)[:260]
         finally:
             self.root.deiconify()
             self.root.lift()
+        if failure:
+            messagebox.showerror("Screen capture", failure,
+                                 parent=self.root)
         if image_path is not None and image_path.exists():
             try:
                 open_preview(self.root, image_path)
@@ -3248,6 +3251,16 @@ def ui_self_test() -> int:
             app.documents_window("core")  # local Core Knowledge panel must open
             assert app.core_docs_button.winfo_exists(), "Core Knowledge button missing"
             assert app.attachment_status.winfo_exists(), "Attachment UI missing"
+            app.show_quick_chat()
+            assert app.quick_popup.winfo_exists(), "Quick-chat overlay missing"
+            app.quick_popup.destroy()
+            app.quick_popup = None
+            activity = app.activity_window()
+            assert activity.winfo_exists(), "Tool activity viewer missing"
+            activity.destroy()
+            app._audit("quick_chat", "completed")
+            assert list_activity(app.db.db)[0][1:] == (
+                "quick_chat", "completed"), "Activity log did not persist"
             if TkinterDnD is not None:
                 assert app.drop_ready, "Native file drag and drop is not active"
             assert get_bot(app.db.db, "research") is not None
