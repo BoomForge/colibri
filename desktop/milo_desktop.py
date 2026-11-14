@@ -471,13 +471,29 @@ class MiloDesktop:
         capture.configure(bg=PANEL, fg=VIOLET,
                           padx=7, pady=7, font=(FONT, 9))
         capture.pack(side="left", padx=(0, 2), pady=7)
+        # Reserve the action buttons BEFORE the expanding text field.
+        # Tk packs children in creation order: previously the 80-column
+        # Text widget consumed all width, pushing Send/Stop offscreen, while
+        # stacked action buttons made the whole composer ~90px high.
+        actions = tk.Frame(composer, bg=PANEL)
+        actions.pack(side="right", padx=(4, 7), pady=3)
+        self.send_button = new_button(actions, "Send  ➤", self.send, primary=True)
+        self.send_button.configure(padx=10, pady=4)
+        self.send_button.pack(side="right", padx=(4, 0))
+        self.stop_button = new_button(actions, "Stop", self.stop)
+        self.stop_button.configure(bg=PANEL_BRIGHT, fg=MUTED,
+                                   font=(FONT, 9), padx=7, pady=4)
+        self.stop_button.pack(side="right")
+        self.stop_button.configure(state="disabled")
+
         self.entry = tk.Text(
-            composer, height=2, wrap="word", font=(FONT, 11),
+            composer, width=24, height=1, wrap="word", font=(FONT, 11),
             bg=PANEL, fg=FG, insertbackground=VIOLET,
             selectbackground=ACCENT, selectforeground=FG,
             relief="flat", highlightthickness=0, borderwidth=0,
-            padx=12, pady=10, undo=True)
-        self.entry.pack(side="left", fill="both", expand=True, padx=(3, 0), pady=3)
+            padx=8, pady=5, undo=True)
+        self.entry.pack(side="left", fill="both", expand=True,
+                        padx=(3, 0), pady=2)
         self.entry.bind("<Return>", self._enter_key)
         self.entry_hint = "Message Milo or @sage / @nova / @forge…"
         self.entry_placeholder = False
@@ -485,17 +501,10 @@ class MiloDesktop:
         self.entry.bind("<FocusIn>", self._composer_focus_in)
         self.entry.bind("<FocusOut>", self._composer_focus_out)
         self.entry.bind("<Control-a>", self._composer_select_all)
-
-        actions = tk.Frame(composer, bg=PANEL)
-        actions.pack(side="right", padx=(6, 9), pady=8)
-        self.send_button = new_button(actions, "Send  ➤", self.send, primary=True)
-        self.send_button.configure(padx=15, pady=7)
-        self.send_button.pack(fill="x", pady=(0, 5))
-        self.stop_button = new_button(actions, "Stop", self.stop)
-        self.stop_button.configure(bg=PANEL_BRIGHT, fg=MUTED,
-                                   font=(FONT, 9), padx=8, pady=5)
-        self.stop_button.pack(fill="x")
-        self.stop_button.configure(state="disabled")
+        # Any edit, paste, or programmatic clear reflows 1–4 visible lines.
+        self.entry.bind("<<Modified>>", self._composer_modified)
+        self.entry.bind("<Configure>", self._composer_resized)
+        self.entry.edit_modified(False)
         attach_row = tk.Frame(main, bg=BG)
         attach_row.pack(fill="x", padx=19, pady=(0, 2))
         self.attachment_status = tk.Label(
@@ -1022,6 +1031,33 @@ class MiloDesktop:
         if not self.entry_placeholder:
             self.entry.tag_add("sel", "1.0", "end-1c")
         return "break"
+
+    def _composer_modified(self, _event=None):
+        if self.entry.edit_modified():
+            self.entry.edit_modified(False)
+            self.entry.after_idle(self._resize_composer)
+
+    def _composer_resized(self, _event=None):
+        # Recalculate wrapped display lines when the user resizes the window.
+        self.entry.after_idle(self._resize_composer)
+
+    def _resize_composer(self):
+        if not self.entry.winfo_exists():
+            return
+        try:
+            if self.entry_placeholder:
+                rows = 1
+            else:
+                # Counting displaylines includes word wrapping, not just
+                # explicit Shift+Enter newlines. The 4-row cap preserves
+                # conversation space and allows the text widget to scroll.
+                count = self.entry.count("1.0", "end-1c", "displaylines")
+                rows = min(4, max(1, 1 + (count[0] if count else 0)))
+            if int(self.entry.cget("height")) != rows:
+                self.entry.configure(height=rows)
+        except tk.TclError:
+            # The Tk text window may be closing during an idle callback.
+            pass
 
     def _enter_key(self, event):
         if event.state & 0x1:  # Shift+Enter
