@@ -91,7 +91,7 @@ from colibri.milo_core.bots import (
     Bot, ChatSettings, attributed_messages, chat_settings,
     get_bot, init_bot_schema, list_bots, model_for_turn,
     resolve_target, save_bot, set_bot_active, set_chat_settings,
-    delete_conversation,
+    delete_conversation, public_handle, SPECIALIST_HANDLES,
 )
 from colibri.milo_core.specialist_presets import ensure_specialists
 from colibri.milo_core.updates import (
@@ -470,7 +470,7 @@ class MiloDesktop:
             padx=12, pady=10, undo=True)
         self.entry.pack(side="left", fill="both", expand=True, padx=(3, 0), pady=3)
         self.entry.bind("<Return>", self._enter_key)
-        self.entry_hint = "Message Milo…"
+        self.entry_hint = "Message Milo or @sage / @nova / @forge…"
         self.entry_placeholder = False
         self._show_composer_hint()
         self.entry.bind("<FocusIn>", self._composer_focus_in)
@@ -553,7 +553,18 @@ class MiloDesktop:
         if bot is None:
             return (AVATARS / self.config["avatar_milo"]
                     if self.config.get("avatar_milo") else BRAND_AVATAR)
-        return AVATARS / bot.avatar if bot.avatar else None
+        # User-selected portraits win; bundled art is a read-only fallback.
+        if bot.avatar:
+            return AVATARS / bot.avatar
+        if bot.id in SPECIALIST_HANDLES:
+            filename = public_handle(bot.id) + ".webp"
+            bundled = self.install_root / "Assets" / "specialists" / filename
+            if bundled.is_file():
+                return bundled
+            source = Path(__file__).resolve().parent / "assets" / "specialists" / filename
+            if source.is_file():
+                return source
+        return None
 
     def _bot_row(self, bot_id, name, meta, *, avatar=None, disabled=False):
         row = tk.Frame(self.bot_inner, bg=SIDEBAR)
@@ -612,7 +623,7 @@ class MiloDesktop:
                     anchor="w", padx=17, pady=(18, 4))
         for bot in active_bots:
             self._bot_row(bot.id, bot.name,
-                          ("@" + bot.id + (" · DISABLED" if not bot.active
+                          ("@" + public_handle(bot.id) + (" · DISABLED" if not bot.active
                                           else " · PRIVATE DM")),
                           avatar=self._bot_avatar_path(bot), disabled=not bot.active)
 
@@ -729,7 +740,8 @@ class MiloDesktop:
             "Each bot has its own instructions and optional model. "
             "Specialists do not automatically inherit Milo's private memories.")
         panel.geometry("635x780")
-        handle = tk.StringVar(value=existing.id if existing else "")
+        handle = tk.StringVar(
+            value=public_handle(existing.id) if existing else "")
         display = tk.StringVar(value=existing.name if existing else "")
         enabled = tk.BooleanVar(value=existing.active if existing else True)
         avatar_path = [existing.avatar if existing else ""]
@@ -802,7 +814,7 @@ class MiloDesktop:
                     anchor="w", padx=24, pady=(4, 3))
         def save():
             try:
-                handle_id = handle.get().strip().lower()
+                handle_id = existing.id if existing else handle.get().strip().lower()
                 raw_instructions = instructions.get("1.0", "end-1c").strip()
                 chosen_model = ("" if model.get() == choices[0] else model.get())
                 if chosen_model and chosen_model not in self._installed_model_choices():
@@ -877,7 +889,7 @@ class MiloDesktop:
         if bot is not None:
             self.milo_title.configure(text=bot.name)
             self.persona_status_label.configure(text="SPECIALIST BOT", fg=ORANGE)
-            self.channel_label.configure(text="PRIVATE · @" + bot.id)
+            self.channel_label.configure(text="PRIVATE · @" + public_handle(bot.id))
             image_path = self._bot_avatar_path(bot)
             self.chat_view.names["assistant"] = bot.name
             self.chat_view.paths["assistant"] = image_path
@@ -921,9 +933,12 @@ class MiloDesktop:
                                      width=3, height=1)
             return
         try:
-            picture = tk.PhotoImage(file=path)
-            factor = max(1, (max(picture.width(), picture.height()) + 49) // 50)
-            picture = picture.subsample(factor)
+            # Pillow loads bundled WebP portraits; native Tk PhotoImage cannot.
+            from PIL import Image, ImageTk
+            with Image.open(path) as source:
+                image = source.convert("RGBA")
+                image.thumbnail((50, 50), Image.Resampling.LANCZOS)
+                picture = ImageTk.PhotoImage(image)
             self.images["bot_header"] = picture
             self.milo_icon.configure(image=picture, text="",
                                      width=50, height=50)
@@ -1041,7 +1056,7 @@ class MiloDesktop:
             chat_mode = chat_settings(self.db.db, self.current_chat)
             if chat_mode.kind == "private" and chat_mode.bot_id != "milo":
                 archive_notice = (
-                    "Private chat with @" + chat_mode.bot_id + ". "
+                    "Private chat with @" + public_handle(chat_mode.bot_id) + ". "
                     "This specialist does not inherit Milo's archived "
                     "relationship memories or private memory notes.\n"
                 )
@@ -1058,11 +1073,19 @@ class MiloDesktop:
                 + archive_notice + "Start a message below.", "notice"
             )
         for role, text, date, author_id, author_name, avatar in rows:
+            # Historical provenance remains untouched in SQLite. Display the
+            # current specialist identity and bundled art where appropriate.
+            display_bot = (get_bot(self.db.db, author_id)
+                           if role == "assistant" and author_id in SPECIALIST_HANDLES
+                           else None)
             self._display_turn(
                 role, text, date,
                 author_id=author_id if role == "assistant" else None,
-                author_name=author_name if role == "assistant" else None,
-                avatar=(AVATARS / avatar if avatar else None))
+                author_name=(display_bot.name if display_bot else author_name)
+                            if role == "assistant" else None,
+                avatar=(AVATARS / avatar if avatar else
+                        self._bot_avatar_path(display_bot)
+                        if display_bot else None))
         self.chat_view.show_latest()
 
     def _refresh_chat_list(self):
@@ -1078,13 +1101,13 @@ class MiloDesktop:
         for chat_id, title, kind, bot_id in rows:
             if kind == "private":
                 bot = get_bot(self.db.db, bot_id) if bot_id != "milo" else None
-                title = "@" + bot_id + " · " + title
+                title = "@" + public_handle(bot_id) + " · " + title
             else:
                 title = "# " + title
             self.chats.append((chat_id, title))
         if self.current_chat not in {x[0] for x in self.chats}:
             context = chat_settings(self.db.db, self.current_chat)
-            title = ("DM @" + context.bot_id if context.kind == "private"
+            title = ("DM @" + public_handle(context.bot_id) if context.kind == "private"
                      else "# New conversation")
             self.chats.insert(0, (self.current_chat, title))
         self.chat_list.set_chats(self.chats, self.current_chat)
