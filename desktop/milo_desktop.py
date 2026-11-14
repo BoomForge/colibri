@@ -2900,6 +2900,8 @@ class MiloDesktop:
             model_dir = self.config.get("model_directory", "")
             roots = {"settings": CONFIG_PATH.parent, "avatars": AVATARS,
                      "documents": DOCUMENTS}
+            if (DATA_DIR / "attachments").is_dir():
+                roots["attachments"] = DATA_DIR / "attachments"
             if ORIGINAL_ARCHIVES.is_dir():
                 roots["archives"] = ORIGINAL_ARCHIVES
             if model_dir:
