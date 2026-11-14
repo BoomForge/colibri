@@ -4004,6 +4004,32 @@ def ui_self_test() -> int:
             mark("before update")
             root.update()
             mark("after update")
+            # Regression for 0.9.4: the oversized Tk composer swallowed the
+            # Send/Stop actions and consumed nearly 90px with an empty input.
+            assert int(app.entry.cget("height")) == 1, (
+                "Empty composer must start at one row")
+            assert app.entry.winfo_height() < 52, (
+                "Empty composer is too tall")
+            assert app.send_button.winfo_ismapped(), (
+                "Send button was pushed offscreen")
+            assert app.stop_button.winfo_ismapped(), (
+                "Stop button was pushed offscreen")
+            parent = app.entry.master
+            right = parent.winfo_rootx() + parent.winfo_width()
+            for button in (app.send_button, app.stop_button):
+                assert button.winfo_rootx() + button.winfo_width() <= right, (
+                    "Composer action button extends outside visible area")
+            app._composer_focus_in(None)
+            app.entry.insert("1.0", "Line one\\nLine two")
+            app._resize_composer()
+            assert 2 <= int(app.entry.cget("height")) <= 4, (
+                "Multiline input must expand within its cap")
+            app.entry.delete("1.0", "end")
+            app._show_composer_hint()
+            app._resize_composer()
+            assert int(app.entry.cget("height")) == 1, (
+                "Composer did not shrink back after clearing")
+            mark("after compact composer regression")
             for child in list(root.winfo_children()):
                 if isinstance(child, tk.Toplevel):
                     child.destroy()
