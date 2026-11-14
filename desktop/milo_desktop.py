@@ -28,6 +28,7 @@ from desktop.chat_view import ChatView, ConversationList, COLORS
 from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
 from colibri.milo_core.filesystem import find_files_by_prefix
+from colibri.milo_core.chat_files import parse_file_query, answer_file_query
 from colibri.milo_core.local_engine import (
     LocalEngine, EngineStartupError, chosen_model, discover_models,
     install_root, managed_models_root, model_valid,
@@ -453,6 +454,33 @@ class MiloDesktop:
         if len(prompt) > 20000:
             messagebox.showerror("Message too long", "Keep messages below 20,000 characters.")
             return
+        # Deterministic read-only local file listings bypass the language
+        # model. This is real functionality, not an invented file inventory.
+        requested_files = (parse_file_query(prompt)
+                           if module_enabled(DATA_DIR, "files") else None)
+        if requested_files is not None:
+            chat_id = self.current_chat
+            self.entry.delete("1.0", "end")
+            self.entry_placeholder = False
+            self.entry.configure(fg=FG)
+            self._display_turn("user", prompt, datetime.now().astimezone())
+            self.pending_message = self.chat_view.add_message(
+                "assistant", "", datetime.now().astimezone(), streaming=True)
+            self._set_busy(True)
+            def file_worker():
+                try:
+                    reply = answer_file_query(requested_files)
+                    if len(reply) > 19000:
+                        reply = reply[:18800] + "\n[Results truncated]"
+                    with LocalMemoryStore(DB_PATH) as store:
+                        store.append_turn(chat_id, prompt, reply)
+                    self.events.put(("local_tool_done", chat_id, reply))
+                except Exception as exc:
+                    self.events.put(("error", chat_id, "Local file listing failed: "
+                                     + str(exc)[:250]))
+            threading.Thread(target=file_worker,
+                             name="milo-local-files", daemon=True).start()
+            return
         model = self.config.get("model", "")
         if self.config.get("model_location") and not self.model_ready:
             messagebox.showinfo("Loading model",
@@ -665,6 +693,13 @@ class MiloDesktop:
                     self.check_connection()
                 elif kind == "model_import_error":
                     messagebox.showerror("Model import", event[1])
+                elif kind == "local_tool_done":
+                    if event[1] == self.current_chat and self.pending_message is not None:
+                        self.chat_view.append_to(self.pending_message, event[2])
+                        self.chat_view.finish(self.pending_message)
+                        self.pending_message = None
+                    self._set_busy(False)
+                    self._refresh_chat_list()
                 elif kind == "chunk":
                     if event[1] == self.current_chat and self.pending_message is not None:
                         self.chat_view.append_to(self.pending_message, event[2])
