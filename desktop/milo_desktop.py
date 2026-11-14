@@ -3688,6 +3688,26 @@ def ui_self_test() -> int:
             assert app.advanced_open
             app.toggle_advanced()
             mark("after sidebar")
+            # Exercise the ACTUAL native menu command after the popup handler
+            # returns. Previous code destroyed this menu immediately, so a
+            # right-click visibly offered Delete but never ran the action.
+            delete_events = []
+            prior_delete = app.chat_list._on_delete
+            try:
+                app.chat_list._on_delete = delete_events.append
+                app.chat_list._menu_chat_id = "synthetic-test-chat"
+                assert app.chat_list._delete_menu.winfo_exists()
+                app.chat_list._delete_menu.invoke(0)
+                root.update_idletasks()
+                root.update()
+                assert delete_events == ["synthetic-test-chat"], (
+                    "Delete menu command was not dispatched")
+                assert app.chat_list._delete_menu.winfo_exists(), (
+                    "Menu destroyed prematurely")
+            finally:
+                app.chat_list._on_delete = prior_delete
+                app.chat_list._menu_chat_id = None
+            mark("after native delete menu regression")
             app.models_window()
             app.updates_modules_window()
             assert app.bot_side.winfo_exists(), "bot roster sidebar missing"
