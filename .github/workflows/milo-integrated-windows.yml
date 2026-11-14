@@ -1,0 +1,127 @@
+name: Milo Integrated Windows (Bundled Colibri)
+
+on:
+  push:
+    branches:
+      - feature/milo-desktop-core-20261114
+    paths:
+      - "desktop/**"
+      - "colibri/milo_core/**"
+      - "c/openai_server.py"
+      - "c/family_registry.py"
+      - "c/Makefile"
+      - "tests/test_milo*.py"
+      - ".github/workflows/milo-integrated-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integrated-portable:
+    name: Build first-party Colibri engines and Milo.exe
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install first-party compiler for Colibri
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: UCRT64
+          update: false
+          path-type: inherit
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-vulkan-headers
+            mingw-w64-ucrt-x86_64-shaderc
+      - name: Compile all supported portable Windows engines from this fork
+        shell: msys2 {0}
+        run: |
+          set -eux
+          cd c
+          for target in colibri glm53 inkling kimi_k3 olmoe qwen36 qwen38 deepseek_v41 mimo qwenimage laya gliner_decide; do
+            make "$target" VK=1 -j2
+          done
+          make deepseek-v4 VK=1 -j2
+          for target in colibri glm53 inkling kimi_k3 olmoe qwen36 qwen38 deepseek_v41 mimo qwenimage laya gliner_decide deepseek_v4; do
+            test -s "$target.exe"
+          done
+          test -s shaders/qmatmul.spv
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install standalone Windows packager
+        shell: pwsh
+        run: |
+          python -m pip install "pyinstaller>=6.10,<7" "cryptography>=42,<51"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile and run Milo regressions on Windows
+        shell: pwsh
+        run: |
+          python -m compileall -q colibri/milo_core desktop/milo_desktop.py desktop/colibri_service.py c/openai_server.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p "test_milo*.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m desktop.milo_desktop --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package Milo with embedded Python gateway (no Python install on user PC)
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name Milo --paths . --paths c --hidden-import openai_server --hidden-import family_registry --hidden-import resource_plan --hidden-import autotune --hidden-import image_engine --hidden-import v4_dsml --hidden-import v41_dsml --hidden-import cluster --hidden-import setup_catalog --hidden-import setup_hw --collect-all cryptography desktop/milo_desktop.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path 'dist/Milo/Milo.exe')) { throw "PyInstaller did not create Milo.exe" }
+      - name: Embed all Colibri Windows engines and gateway from the checked-out fork
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "dist/Milo/Runtime" | Out-Null
+          New-Item -ItemType Directory -Force "dist/Milo/Runtime/shaders" | Out-Null
+          New-Item -ItemType Directory -Force "dist/Milo/Runtime/tools" | Out-Null
+          New-Item -ItemType Directory -Force "dist/Milo/Models" | Out-Null
+          Copy-Item -Path "c/*.exe" -Destination "dist/Milo/Runtime/"
+          Copy-Item -Path "c/*.py" -Destination "dist/Milo/Runtime/"
+          Copy-Item -Path "c/shaders/*.spv" -Destination "dist/Milo/Runtime/shaders/"
+          Copy-Item -Path "c/tools/*.py" -Destination "dist/Milo/Runtime/tools/"
+          Copy-Item -Path "LICENSE" -Destination "dist/Milo/Runtime/LICENSE-colibri.txt"
+          @(
+            "Milo bundled Colibri runtime",
+            "Source repository: BoomForge/colibri",
+            "Build commit: ${env:GITHUB_SHA}",
+            "Runtime binaries built from fork source by GitHub Actions",
+            "No model weights are bundled"
+          ) | Set-Content "dist/Milo/Runtime/BUILD-SOURCE.txt" -Encoding utf8
+          @(
+            "MILO MODELS",
+            "",
+            "This folder holds your locally installed LLM checkpoints.",
+            "Put each full Colibri-compatible model in its own subfolder.",
+            "A full folder needs config.json, tokenizer.json and model weights.",
+            "Do not put loose GGUF files here without their matching model metadata.",
+            "",
+            "Open Milo.exe, click Models, and select or import an existing model.",
+            "Milo then starts its own bundled Colibri service without a console.",
+            "",
+            "No LLM weights or online model downloads are included in this package."
+          ) | Set-Content "dist/Milo/Models/README-MODELS.txt" -Encoding utf8
+          if (!(Test-Path "dist/Milo/Runtime/qwen36.exe")) { throw "Missing Qwen engine" }
+          if (!(Test-Path "dist/Milo/Runtime/openai_server.py")) { throw "Missing Python gateway" }
+          if (!(Test-Path "dist/Milo/Models/README-MODELS.txt")) { throw "Missing Models folder" }
+      - name: Validate native bundle without any installed Python or model
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "dist/Milo/Milo.exe").Path
+          $quick = Start-Process -FilePath $exe -ArgumentList "--self-test" -PassThru -Wait
+          if ($quick.ExitCode -ne 0) { throw "Bundled Milo smoke test failed ($($quick.ExitCode))" }
+          $embedded = Start-Process -FilePath $exe -ArgumentList "--embedded-self-test" -PassThru -Wait
+          if ($embedded.ExitCode -ne 0) { throw "Bundled Colibri import/engine self test failed ($($embedded.ExitCode))" }
+      - name: Publish a single folder ZIP containing engine and Models
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/Milo/*" -DestinationPath "Milo-Bundled-Colibri-Windows.zip" -CompressionLevel Optimal
+          if (!(Test-Path "Milo-Bundled-Colibri-Windows.zip")) { throw "Windows ZIP missing" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Milo-Bundled-Colibri-Windows
+          path: Milo-Bundled-Colibri-Windows.zip
+          if-no-files-found: error
+          retention-days: 30
