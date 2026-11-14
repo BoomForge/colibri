@@ -139,6 +139,8 @@ jobs:
           if ($quick.ExitCode -ne 0) { throw "Bundled Milo smoke test failed ($($quick.ExitCode))" }
           $embedded = Start-Process -FilePath $exe -ArgumentList "--embedded-self-test" -PassThru -Wait
           if ($embedded.ExitCode -ne 0) { throw "Bundled Colibri import/engine self test failed ($($embedded.ExitCode))" }
+          $ui = Start-Process -FilePath $exe -ArgumentList "--ui-self-test" -PassThru -Wait
+          if ($ui.ExitCode -ne 0) { throw "Milo window, collapsed navigation or updater panel smoke test failed" }
       - name: Publish a single folder ZIP containing engine and Models
         shell: pwsh
         run: |
@@ -179,6 +181,8 @@ jobs:
           if ($second.ExitCode -ne 0 -or !(Test-Path $probe)) { throw "Reinstall removed user models" }
           $smoke = Start-Process -FilePath $exe -ArgumentList "--embedded-self-test" -Wait -PassThru
           if ($smoke.ExitCode -ne 0) { throw "Installed Milo engine smoke check failed" }
+          $ui = Start-Process -FilePath $exe -ArgumentList "--ui-self-test" -Wait -PassThru
+          if ($ui.ExitCode -ne 0) { throw "Installed Milo user interface failed" }
       - name: Build separately updatable sample module and catalog
         shell: pwsh
         run: |
