@@ -46,8 +46,11 @@ jobs:
       - name: Test bundled exe without a display or model server
         shell: pwsh
         run: |
-          & .\dist\Milo\Milo.exe --self-test
-          if ($LASTEXITCODE -ne 0) { throw "Milo executable smoke test failed" }
+          # A windowed Windows app runs asynchronously via '&' in PowerShell.
+          # Start-Process -Wait provides its actual exit code.
+          $exe = (Resolve-Path "dist/Milo/Milo.exe").Path
+          $process = Start-Process -FilePath $exe -ArgumentList "--self-test" -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Milo executable smoke test failed (exit $($process.ExitCode))" }
       - name: Package a portable directory
         shell: pwsh
         run: |
