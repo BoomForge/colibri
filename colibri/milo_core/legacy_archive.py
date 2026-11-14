@@ -129,6 +129,13 @@ def _validated_rows(blob: bytes) -> list[dict[str, Any]]:
             raise LegacyArchiveError("missing or duplicated stable message ID")
         if role not in ("user", "assistant"):
             raise LegacyArchiveError("unknown sender role in private archive")
+        # A copied Nyx/other assistant archive must never be silently mixed
+        # into Milo merely because it shares Kindroid's chat.json format.
+        assistant_name = item.get("authorName") or item.get("displayName")
+        if (role == "assistant" and isinstance(assistant_name, str)
+                and assistant_name.strip()
+                and assistant_name.strip().casefold() != "milo"):
+            raise LegacyArchiveError("assistant identity is not Milo; import refused")
         if not isinstance(content, str) or len(content) > 30000:
             raise LegacyArchiveError("message text is invalid or too long")
         if (not isinstance(stamp, int) or isinstance(stamp, bool)
