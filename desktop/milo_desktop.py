@@ -20,6 +20,7 @@ import time
 from datetime import datetime
 from urllib.request import urlopen
 import uuid
+import webbrowser
 
 import tkinter as tk
 try:
@@ -2197,9 +2198,17 @@ class MiloDesktop:
                         "Enable it in the list and restart Milo to load it.")
                 elif kind == "updater_error":
                     self.update_label.configure(
-                        text="Update failed; existing installation unchanged.",
+                        text="Update check failed: " + event[1][:270] +
+                             "\nExisting installation unchanged. "
+                             "You can open the official releases page in a browser.",
                         fg=ORANGE)
-                    messagebox.showerror("Updater", event[1])
+                    messagebox.showerror(
+                        "Updater connection",
+                        event[1] + "\n\n"
+                        "If GitHub is blocked on this PC, use the manual "
+                        "installer from a trusted source and check its hash. "
+                        "Milo has not installed or changed anything.",
+                        parent=self.root)
                 elif kind == "gguf_model_ready":
                     if len(event) > 3 and event[3] == "research":
                         original = get_bot(self.db.db, "research")
@@ -2483,6 +2492,18 @@ class MiloDesktop:
             buttons, "Download verified installer", get_update)
         self.update_button.configure(state="disabled")
         self.update_button.pack(side="left")
+        def open_official_releases():
+            # User-triggered browser navigation; never opens remote installers
+            # in the background and never bypasses checksum verification.
+            if not webbrowser.open(
+                    "https://github.com/BoomForge/colibri/releases"):
+                messagebox.showinfo(
+                    "GitHub releases",
+                    "Open https://github.com/BoomForge/colibri/releases "
+                    "in your browser.", parent=panel)
+        new_button(
+            buttons, "Open GitHub Releases", open_official_releases).pack(
+                side="left", padx=(9, 0))
 
         tk.Frame(panel, height=1, bg=EDGE).pack(fill="x", padx=24, pady=(4, 12))
         tk.Label(panel, text="Built-in features", bg=PANEL, fg=VIOLET,
