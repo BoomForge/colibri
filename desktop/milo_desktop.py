@@ -1152,6 +1152,36 @@ class MiloDesktop:
         model_location = model_for_turn(
             settings, bot, self.config.get("model_location", ""))
 
+        # A filename-specific "open" request uses deterministic local file
+        # resolution. It NEVER invokes the model or executes the named file.
+        requested_open = (parse_open_request(clean_prompt)
+                          if target_id == "milo" and
+                          module_enabled(DATA_DIR, "files") else None)
+        if requested_open is not None:
+            chat_id = self.current_chat
+            self._begin_tool_turn(chat_id, prompt, target_id,
+                                  author_name, author_avatar)
+            def locate_worker():
+                try:
+                    found = locate_file(requested_open)
+                    if self.cancel.is_set():
+                        self.events.put(("cancelled", chat_id))
+                    else:
+                        self.events.put((
+                            "file_preview_ready", chat_id, prompt,
+                            str(found), target_id, author_name, "",
+                            settings.kind == "room"))
+                except (OSError, ValueError) as exc:
+                    self.events.put((
+                        "tool_error", chat_id, prompt,
+                        "I couldn't open that file: " + str(exc)[:350],
+                        target_id, author_name, "",
+                        settings.kind == "room"))
+            threading.Thread(
+                target=locate_worker, name="milo-local-preview",
+                daemon=True).start()
+            return
+
         # Milo's local deterministic file tools remain a separate, read-only
         # path. A specialist bot does not silently inherit Milo's tools.
         requested_files = (parse_file_query(clean_prompt)
@@ -1180,6 +1210,99 @@ class MiloDesktop:
                                      + str(exc)[:250]))
             threading.Thread(
                 target=file_worker, name="milo-local-files", daemon=True).start()
+            return
+
+        # Explicit web requests route through a real search tool, even if no
+        # specialist exists. Milo's own web capability requires this exact
+        # per-request confirmation; specialists additionally need their toggle.
+        if wants_research(clean_prompt):
+            if target_id != "milo" and not web_enabled(self.db.db, target_id):
+                messagebox.showinfo(
+                    "Internet research disabled",
+                    "Web research is disabled for @" + target_id +
+                    ". Enable it in the specialist bot editor. "
+                    "Every actual search will still require approval.")
+                return
+            try:
+                query = query_for_research(clean_prompt)
+            except ResearchError as exc:
+                messagebox.showerror("Web research", str(exc)[:260])
+                return
+            if not messagebox.askyesno(
+                "Search public web for @" + target_id,
+                "Search the public web for:\n\n" + query +
+                "\n\nOnly this topic will be sent to the search provider. "
+                "Milo will never include your uploaded files, private memory "
+                "or previous conversations in the web request. "
+                "Read-only HTTPS sources only. Continue?"):
+                return
+            chat_id = self.current_chat
+            available_model = (
+                self.model_ready and bool(self.models) and
+                (not model_location or self.active_model_location == model_location))
+            model_name = (self.config.get("model") if
+                          self.config.get("model") in self.models else
+                          (self.models[0] if self.models else ""))
+            provider_url = self.active_base_url
+            self._begin_tool_turn(chat_id, prompt, target_id,
+                                  author_name, author_avatar)
+            self.connection_label.configure(
+                text="● Live web search · " + query[:50], fg=ORANGE)
+            def search_worker():
+                try:
+                    results = search_public_web(query)
+                    if self.cancel.is_set():
+                        self.events.put(("cancelled", chat_id))
+                        return
+                    if available_model and model_name:
+                        self.events.put(("research_status",
+                                         "● Retrieved live sources · preparing answer"))
+                        with LocalMemoryStore(DB_PATH) as store:
+                            provider = LocalOpenAIProvider(
+                                model=model_name, base_url=provider_url)
+                            identity = bot.instructions if bot else MiloProfile().instructions
+                            conversation = MiloConversation(
+                                provider, store,
+                                profile=MiloProfile(
+                                    name=author_name, instructions=identity),
+                                bot_id=target_id, bot_name=author_name,
+                                bot_avatar=bot.avatar if bot else "",
+                                shared_room=(settings.kind == "room"),
+                                research_context=source_context(results),
+                                answer_suffix=source_footer(results))
+                            chunks = conversation.stream_reply(
+                                clean_prompt, chat_id=chat_id,
+                                stored_user_text=prompt)
+                            try:
+                                for chunk in chunks:
+                                    if self.cancel.is_set():
+                                        chunks.close()
+                                        self.events.put(("cancelled", chat_id))
+                                        return
+                                    self.events.put(("chunk", chat_id, chunk))
+                            finally:
+                                chunks.close()
+                    else:
+                        # The web tool can still give grounded clickable
+                        # sources while Colibri is offline or changing models.
+                        reply = search_results_reply(query, results)
+                        if self.cancel.is_set():
+                            self.events.put(("cancelled", chat_id))
+                            return
+                        self._save_direct_turn(
+                            chat_id, prompt, reply, target_id, author_name,
+                            bot.avatar if bot else "", settings.kind == "room")
+                        self.events.put(("chunk", chat_id, reply))
+                    self.events.put(("done", chat_id))
+                except Exception as exc:
+                    self.events.put((
+                        "tool_error", chat_id, prompt,
+                        "The live search failed; I won't invent results. " +
+                        str(exc)[:310], target_id, author_name,
+                        bot.avatar if bot else "", settings.kind == "room"))
+            threading.Thread(
+                target=search_worker, name="milo-live-web",
+                daemon=True).start()
             return
 
         if model_location:
