@@ -9,7 +9,7 @@ background surveillance, or stored broad action grants.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import ctypes
 import json
 import os
@@ -21,6 +21,9 @@ from urllib.parse import urlsplit
 import webbrowser
 
 from .chat_files import known_folder
+from .file_operations import (
+    MovePlan, plan_file_moves, execute_file_moves, FileMoveError,
+)
 
 
 class PCActionError(RuntimeError):
@@ -33,6 +36,7 @@ class PCPlan:
     title: str
     preview: str
     args: tuple[str, ...]
+    prepared: MovePlan | None = None
 
 
 KNOWN_APPS = {
@@ -180,6 +184,18 @@ def parse_pc_request(message: str, *, registered: dict[str, str] | None = None) 
         return PCPlan("type_text", "Type in "+title,
                       "Type EXACTLY this text into a single matching, non-sensitive window. "
                       "No Enter is pressed:\n\n"+content+"\n\nTarget: "+title, (title, content))
+
+    m = re.fullmatch(
+        r"""(?:move|organise|organize)\s+(?:all\s+)?files\s+(?:containing|with name containing)\s+["']([^"']{2,100})["']\s+from\s+(?:my\s+)?(desktop|documents|downloads|pictures)\s+to\s+(?:my\s+)?(desktop|documents|downloads|pictures)""",
+        text, re.I)
+    if m:
+        needle, src, dst = m.group(1), m.group(2).lower(), m.group(3).lower()
+        if src == dst:
+            return None
+        return PCPlan(
+            "move_assets", "Move selected project assets",
+            "Review matching local files before moving them. No overwrite.",
+            (src, dst, needle))
 
     m = re.fullmatch(r"""rename\s+["']([^"']{1,120})["']\s+to\s+["']([^"']{1,120})["']\s+in\s+(?:my\s+)?(desktop|documents|downloads|pictures)""", text, re.I)
     if m:
@@ -346,6 +362,33 @@ def _type_unicode(value: str) -> None:
         raise PCActionError("Windows did not accept all keystrokes; check the target manually")
 
 
+def prepare_pc_plan(plan: PCPlan, *, roots: dict[str, Path] | None = None) -> PCPlan:
+    """Preflight file moves so the confirmation shows EVERY actual filename."""
+    if plan.kind != "move_assets":
+        return plan
+    src, dst, needle = plan.args
+    source = _folder(src, roots=roots)
+    destination = _folder(dst, roots=roots)
+    prepared = plan_file_moves(source, destination, needle)
+    if not prepared.files:
+        raise PCActionError("No eligible matching project files were found")
+    lines = [
+        "Move exactly these "+str(len(prepared.files))+" file(s):",
+        *[x.source.name+" ("+str(x.size)+" bytes)" for x in prepared.files],
+        "",
+        "FROM: "+str(source),
+        "TO: "+str(destination),
+        "Every file will be rechecked immediately before moving.",
+        "No files will be overwritten; no recursive traversal.",
+    ]
+    # The askyesno dialog is finite; MAX_FILES remains 100 but the UI
+    # declines huge reviews rather than truncating essential filenames.
+    preview = "\n".join(lines)
+    if len(preview) > 4500:
+        raise PCActionError("Too many filenames for a complete approval preview")
+    return replace(plan, preview=preview, prepared=prepared)
+
+
 def execute_pc_plan(plan: PCPlan, *, approved: bool = False,
                     registered: dict[str, str] | None = None,
                     roots: dict[str, Path] | None = None,
@@ -360,7 +403,8 @@ def execute_pc_plan(plan: PCPlan, *, approved: bool = False,
         raise PermissionError("Milo needs fresh, explicit owner approval for this operation")
     if not isinstance(plan, PCPlan) or plan.kind not in (
         "launch_app", "open_folder", "open_url", "folder_summary",
-        "list_windows", "focus_window", "type_text", "rename_file", "create_note"
+        "list_windows", "focus_window", "type_text", "rename_file", "create_note",
+        "move_assets"
     ):
         raise PCActionError("Invalid proposed Windows operation")
     if (platform or sys.platform) != "win32":
@@ -436,6 +480,16 @@ def execute_pc_plan(plan: PCPlan, *, approved: bool = False,
                 raise PCActionError("Target lost focus, so no text was typed")
         type_writer(value)
         return "Typed "+str(len(value))+" approved characters into the selected window."
+    if kind == "move_assets":
+        if plan.prepared is None or not isinstance(plan.prepared, MovePlan):
+            raise PCActionError("File move has not been fully previewed")
+        src, dst, needle = plan.args
+        if (plan.prepared.literal_match != needle or
+                plan.prepared.source_root != _folder(src, roots=roots) or
+                plan.prepared.destination_root != _folder(dst, roots=roots)):
+            raise PCActionError("The approved move source or destination changed")
+        count = execute_file_moves(plan.prepared, approved=True)
+        return "Moved "+str(count)+" fully previewed project asset(s) without overwrite."
     if kind == "rename_file":
         folder_name, old, new = plan.args
         src_root = _folder(folder_name, roots=roots)
