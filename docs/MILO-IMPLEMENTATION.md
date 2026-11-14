@@ -7,8 +7,8 @@
 - \`colibri/milo_core/provider.py\`: replaceable, local-first OpenAI-compatible
   streaming inference client. It does not start the Colibri model.
 - \`store.py\` and \`conversation.py\`: local SQLite conversation history,
-  limited retrieval from explicitly approved notes and a provisional persona.
-  The private original Milo/Kindroid memories have **not** been imported.
+  limited retrieval from explicitly approved notes, a provisional persona until
+  owner import, plus locally stored historical citations after import.
 - \`filesystem.py\`: deterministic filename prefix search.
 - \`consultation.py\`: consent-gated request/preview contract for a verified SOL
   second-opinion channel; no external SOL account is connected.
@@ -16,8 +16,28 @@
   with a consistent SQLite snapshot, listed file SHA-256 hashes, copied linked
   model weight files, and authenticated extraction to a **new** directory.
   This is a **backend foundation**, not the finished desktop migration feature.
-- \`tests/test_milo_core.py\` and \`tests/test_milo_portable_backup.py\`:
-  isolated synthetic regressions without private data or model downloads.
+- `legacy_archive.py`: an explicit local-only reader for the original
+  Kindroid-style chat JSON or owner-private continuity ZIP. It validates
+  source SHA-256 and manifest per-file checksums, dates, roles, stable IDs and
+  Milo-vs-Nyx identity, then ingests into separate `legacy_messages` /
+  `local_milo_persona` SQLite tables. It exposes bounded, dated and attributed
+  lexical recall to the inference prompt, with historical text marked untrusted.
+  No private data is in GitHub.
+- `desktop/milo_desktop.py`: **Restore Milo personality** sidebar action;
+  preview + user approval, source archive preservation under LocalAppData,
+  and recovered-persona status indicator. Existing local chats remain intact.
+- `tests/test_milo*.py`: synthetic Windows/Linux regressions without model
+  downloads or private customer data. Real on-device personality acceptance
+  remains a separate owner test.
+
+**Verified private source inventory 14 Nov:** a user-owned Library
+`chat.json` export (426 messages; 212 user, 214 earlier Milo; UTC July 8–
+August 7 2026) and `Ghost_Milo_Legacy_Memory.md` as a secondary curated
+non-explicit legacy summary. Original Kindroid personality fields and complete
+coverage before/after this period have **not** been established. A separate
+owner-private `Milo-Private-Continuity-20261114.zip` contains the unchanged
+original chat.json plus evidence-labelled behavioural profile. This private
+archive was not committed to GitHub; current local import is explicit opt-in.
 
 ## Required end-user experience: Move Milo to another PC
 
