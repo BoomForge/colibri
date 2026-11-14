@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tkinter as tk
-from desktop.rich_text import RichMessage
+from desktop.rich_text import RichMessage, _copy, copy_selection, selected_text
 
 try:
     from PIL import Image, ImageDraw, ImageTk
@@ -335,6 +335,67 @@ class ChatView(tk.Frame):
         finally:
             menu.grab_release()
             menu.destroy()
+
+    def selectable_view(self):
+        """One continuous selectable transcript, unlike the per-message widgets.
+
+        Users can drag across multiple messages, Ctrl+C, Ctrl+A, copy selected,
+        or copy all. No changes to the permanent conversation store.
+        """
+        window = tk.Toplevel(self)
+        window.title("Milo · Select conversation text")
+        window.geometry("820x700")
+        window.minsize(520, 340)
+        window.configure(bg=COLORS["header"])
+        tk.Label(
+            window,
+            text="Select text across messages · Ctrl+C copies selection · Ctrl+A selects all",
+            bg=COLORS["header"], fg=COLORS["muted"],
+            font=(FONT, 10)).pack(anchor="w", padx=18, pady=(15, 10))
+        reader = tk.Frame(window, bg=COLORS["background"])
+        reader.pack(fill="both", expand=True, padx=18)
+        bar = tk.Scrollbar(reader)
+        bar.pack(side="right", fill="y")
+        body = tk.Text(
+            reader, wrap="word", relief="flat", borderwidth=0,
+            background=COLORS["background"], foreground=COLORS["text"],
+            selectbackground=COLORS["selected"],
+            selectforeground=COLORS["text"], font=(FONT, 10),
+            padx=14, pady=14, exportselection=False, cursor="xterm",
+            yscrollcommand=bar.set)
+        bar.configure(command=body.yview)
+        body.pack(side="left", fill="both", expand=True)
+        segments = []
+        for message in self.messages:
+            speaker = message["author_name"]
+            segments.append(
+                speaker + " · " + natural_time(message["date"]) + "\n" +
+                message["content"])
+        transcript = "\n\n".join(segments)
+        if len(transcript) > 2_000_000:
+            transcript = transcript[:2_000_000] + "\n[Long chat truncated]"
+        body.insert("1.0", transcript)
+        body.configure(state="disabled")
+        body.bind("<Control-c>", lambda _event: copy_selection(body))
+        body.bind("<Control-Insert>", lambda _event: copy_selection(body))
+        body.bind(
+            "<Control-a>", lambda _event: (
+                body.tag_add("sel", "1.0", "end-1c") or "break"))
+        actions = tk.Frame(window, bg=COLORS["header"])
+        actions.pack(fill="x", padx=18, pady=12)
+        tk.Button(
+            actions, text="Copy selection", relief="flat", bg=COLORS["selected"],
+            fg=COLORS["text"], activebackground=COLORS["chip"],
+            command=lambda: copy_selection(body), padx=14, pady=8,
+            cursor="hand2").pack(side="left", padx=(0, 9))
+        tk.Button(
+            actions, text="Copy entire conversation", relief="flat",
+            bg=COLORS["selected"], fg=COLORS["text"],
+            activebackground=COLORS["chip"],
+            command=lambda: _copy(window, transcript), padx=14, pady=8,
+            cursor="hand2").pack(side="left")
+        body.focus_set()
+        return window, body
 
     def append_to(self, message: dict, addition: str):
         if not addition:
