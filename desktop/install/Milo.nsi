@@ -6,8 +6,8 @@ Unicode True
 !define VERSION "0.2.0"
 !define COMPANY "Pixelwolf"
 !define REG "Software\Microsoft\Windows\CurrentVersion\Uninstall\PixelwolfMilo"
-!define MUI_ICON "desktop\assets\Milo.ico"
-!define MUI_UNICON "desktop\assets\Milo.ico"
+!define MUI_ICON "..\assets\Milo.ico"
+!define MUI_UNICON "..\assets\Milo.ico"
 
 Name "${PRODUCT}"
 OutFile "Milo-Setup-${VERSION}.exe"
@@ -31,7 +31,7 @@ Section "Install Milo" SEC_MAIN
     SetShellVarContext current
     SetOutPath "$INSTDIR"
     ; Never delete install directory on upgrade: Models is user-owned.
-    File /r "dist\Milo\*"
+    File /r "..\..\dist\Milo\*"
 
     WriteUninstaller "$INSTDIR\Uninstall.exe"
     CreateDirectory "$SMPROGRAMS\Milo"
