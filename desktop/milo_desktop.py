@@ -758,11 +758,20 @@ class MiloDesktop:
         new_button(actions, "Use selected model", select, primary=True).pack(
             side="left", padx=(0, 8))
         new_button(actions, "Import existing model", add).pack(side="left")
+        folder_actions = tk.Frame(panel, bg=PANEL)
+        folder_actions.pack(fill="x", padx=24, pady=(0, 14))
         new_button(
-            panel, "Open Models folder",
+            folder_actions, "Open Models folder",
             lambda: os.startfile(str(self.models_root))
             if sys.platform == "win32" else None,
-        ).pack(fill="x", padx=24, pady=(0, 14))
+        ).pack(side="left", padx=(0, 8))
+        new_button(
+            folder_actions, "View Colibri log",
+            lambda: os.startfile(str(DATA_DIR / "logs" / "colibri-service.log"))
+            if sys.platform == "win32" and
+               (DATA_DIR / "logs" / "colibri-service.log").is_file()
+            else messagebox.showinfo("Colibri", "No local engine log yet.", parent=panel),
+        ).pack(side="left")
 
     def restore_milo_personality(self):
         """Private, approved local import; no GitHub upload or model training."""
@@ -870,7 +879,6 @@ class MiloDesktop:
             ("Milo's display name", "milo_name"),
             ("Local API base URL", "base_url"),
             ("Model ID", "model"),
-            ("Model weights folder (optional backup source)", "model_directory"),
         ]
         for label, key in fields:
             tk.Label(panel, text=label, bg=PANEL, fg=MUTED,
@@ -906,6 +914,7 @@ class MiloDesktop:
                 messagebox.showerror("Invalid names", "Enter both display names.",
                                      parent=panel)
                 return
+            next_config["model_directory"] = str(self.models_root)
             self.config = next_config
             save_config(self.config)
             self._refresh_profile()
