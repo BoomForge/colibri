@@ -1513,12 +1513,36 @@ class MiloDesktop:
                 "Continue with this one search?"):
                 return
 
+        # User-selected attachments enter the private application folder only
+        # when a real chat turn is submitted. Attachments are not uploaded.
+        staged = []
+        local_context = ""
+        if self.queued_attachments:
+            try:
+                staged = stage_attachments(
+                    self.queued_attachments, DATA_DIR)
+                local_context, has_images = attachment_context(staged)
+            except (AttachmentError, OSError, ValueError) as exc:
+                messagebox.showerror("Attachment", str(exc)[:300])
+                return
+            if has_images and not messagebox.askokcancel(
+                "Image understanding not installed",
+                "The local model currently running is a text-only checkpoint. "
+                "Milo can preview your image, but cannot analyse its pixels yet. "
+                "Continue with text-only document context?"):
+                for item in staged:
+                    item.path.unlink(missing_ok=True)
+                return
+        attachment_names = (", ".join(f.name for f in staged) if staged else "")
+        stored_prompt = (prompt + ("\n[Attached: " + attachment_names + "]"
+                                   if attachment_names else ""))
+        self.clear_attachments()
         chat_id = self.current_chat
         self.pending_send = None
         self.entry.delete("1.0", "end")
         self.entry_placeholder = False
         self.entry.configure(fg=FG)
-        self._display_turn("user", prompt, datetime.now().astimezone())
+        self._display_turn("user", stored_prompt, datetime.now().astimezone())
         self.pending_message = self.chat_view.add_message(
             "assistant", "", datetime.now().astimezone(),
             streaming=True, author_id=target_id, author_name=author_name,
@@ -1548,10 +1572,11 @@ class MiloDesktop:
                         bot_avatar=bot.avatar if bot else "",
                         shared_room=(settings.kind == "room"),
                         research_context=research_context,
-                        answer_suffix=answer_suffix)
+                        answer_suffix=answer_suffix,
+                        local_attachment_context=local_context)
                     chunks = conversation.stream_reply(
                         clean_prompt, chat_id=chat_id,
-                        stored_user_text=prompt)
+                        stored_user_text=stored_prompt)
                     try:
                         for chunk in chunks:
                             if self.cancel.is_set():
