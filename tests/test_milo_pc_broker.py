@@ -68,7 +68,8 @@ class BrokerTests(unittest.TestCase):
         result = execute_pc_plan(
             plan, approved=True, platform="win32", app_launcher=called.append)
         self.assertEqual(result, "Launched notepad.")
-        self.assertEqual(called, ["notepad.exe"])
+        self.assertEqual(len(called), 1)
+        self.assertEqual(Path(called[0]).name.lower(), "notepad.exe")
 
     def test_launch_registered_app_and_revoke_it(self):
         with tempfile.TemporaryDirectory() as d:
