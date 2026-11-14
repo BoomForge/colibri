@@ -215,7 +215,7 @@ def export_bundle(
                     archive.writestr("manifest.json", json.dumps(
                         manifest, separators=(",", ":"), sort_keys=True,
                     ).encode("utf-8"))
-                sink.write(encryptor.finalize())
+                output.write(encryptor.finalize())
                 output.write(encryptor.tag)
                 output.flush()
                 os.fsync(output.fileno())
