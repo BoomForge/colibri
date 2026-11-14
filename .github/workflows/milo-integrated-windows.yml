@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   integrated-portable:
@@ -51,10 +51,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install standalone Windows packager
+      - name: Install standalone Windows packager and icon compiler
         shell: pwsh
         run: |
-          python -m pip install "pyinstaller>=6.10,<7" "cryptography>=42,<51"
+          python -m pip install "pyinstaller>=6.10,<7" "cryptography>=42,<51" "Pillow>=11,<13"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Convert official Milo artwork into Windows icon
+        shell: pwsh
+        run: |
+          @'
+          from PIL import Image
+          from pathlib import Path
+          source = Path("desktop/assets/milo_profile.png")
+          if not source.is_file():
+              raise SystemExit("Milo image missing")
+          art = Image.open(source).convert("RGBA")
+          art.save("desktop/assets/Milo.ico", sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])
+          if Path("desktop/assets/Milo.ico").stat().st_size < 2000:
+              raise SystemExit("Windows icon seems empty")
+          '@ | python -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Compile and run Milo regressions on Windows
         shell: pwsh
@@ -68,7 +83,7 @@ jobs:
       - name: Package Milo with embedded Python gateway (no Python install on user PC)
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name Milo --paths . --paths c --hidden-import openai_server --hidden-import family_registry --hidden-import resource_plan --hidden-import autotune --hidden-import image_engine --hidden-import v4_dsml --hidden-import v41_dsml --hidden-import cluster --hidden-import setup_catalog --hidden-import setup_hw --collect-all cryptography desktop/milo_desktop.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name Milo --icon desktop/assets/Milo.ico --paths . --paths c --hidden-import gguf_reader --hidden-import openai_server --hidden-import family_registry --hidden-import resource_plan --hidden-import autotune --hidden-import image_engine --hidden-import v4_dsml --hidden-import v41_dsml --hidden-import cluster --hidden-import setup_catalog --hidden-import setup_hw --collect-all cryptography desktop/milo_desktop.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (!(Test-Path 'dist/Milo/Milo.exe')) { throw "PyInstaller did not create Milo.exe" }
       - name: Embed all Colibri Windows engines and gateway from the checked-out fork
@@ -76,6 +91,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force "dist/Milo/Runtime" | Out-Null
           New-Item -ItemType Directory -Force "dist/Milo/Runtime/shaders" | Out-Null
+          New-Item -ItemType Directory -Force "dist/Milo/Assets" | Out-Null
           New-Item -ItemType Directory -Force "dist/Milo/Runtime/tools" | Out-Null
           New-Item -ItemType Directory -Force "dist/Milo/Models" | Out-Null
           Copy-Item -Path "c/*.exe" -Destination "dist/Milo/Runtime/"
@@ -83,6 +99,8 @@ jobs:
           Copy-Item -Path "c/shaders/*.spv" -Destination "dist/Milo/Runtime/shaders/"
           Copy-Item -Path "c/tools/*.py" -Destination "dist/Milo/Runtime/tools/"
           Copy-Item -Path "LICENSE" -Destination "dist/Milo/Runtime/LICENSE-colibri.txt"
+          Copy-Item "desktop/assets/milo_profile.png" "dist/Milo/Assets/milo_profile.png"
+          Copy-Item "desktop/assets/Milo.ico" "dist/Milo/Assets/Milo.ico"
           @(
             "Milo bundled Colibri runtime",
             "Source repository: BoomForge/colibri",
@@ -106,6 +124,9 @@ jobs:
           if (!(Test-Path "dist/Milo/Runtime/qwen36.exe")) { throw "Missing Qwen engine" }
           if (!(Test-Path "dist/Milo/Runtime/openai_server.py")) { throw "Missing Python gateway" }
           if (!(Test-Path "dist/Milo/Models/README-MODELS.txt")) { throw "Missing Models folder" }
+          if (!(Test-Path "dist/Milo/Assets/Milo.ico")) { throw "Missing Milo icon" }
+          if (!(Test-Path "dist/Milo/Assets/milo_profile.png")) { throw "Missing Milo avatar" }
+          if (!(Test-Path "dist/Milo/Runtime/tools/gguf_import.py")) { throw "Missing GGUF importer" }
       - name: Validate native bundle without any installed Python or model
         shell: pwsh
         run: |
@@ -125,3 +146,83 @@ jobs:
           path: Milo-Bundled-Colibri-Windows.zip
           if-no-files-found: error
           retention-days: 30
+      - name: Install NSIS and compile per-user Milo installer
+        shell: pwsh
+        run: |
+          $compiler = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (!(Test-Path $compiler)) {
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "NSIS installation failed" }
+          }
+          if (!(Test-Path $compiler)) { throw "NSIS compiler missing" }
+          & $compiler /V3 "desktop/install/Milo.nsi"
+          if ($LASTEXITCODE -ne 0) { throw "NSIS compile failed" }
+          if (!(Test-Path "Milo-Setup-0.2.0.exe")) { throw "Installer missing" }
+      - name: Verify installed Milo and preserve Models on reinstall
+        shell: pwsh
+        run: |
+          $setup = (Resolve-Path "Milo-Setup-0.2.0.exe").Path
+          $first = Start-Process -FilePath $setup -ArgumentList "/S" -Wait -PassThru
+          if ($first.ExitCode -ne 0) { throw "Silent install failed: $($first.ExitCode)" }
+          $installed = Join-Path $env:LOCALAPPDATA "Programs\Milo"
+          $exe = Join-Path $installed "Milo.exe"
+          if (!(Test-Path $exe)) { throw "Installer omitted Milo.exe" }
+          if (!(Test-Path (Join-Path $installed "Assets\Milo.ico"))) { throw "Installer omitted icon" }
+          if (!(Test-Path (Join-Path $installed "Models\README-MODELS.txt"))) { throw "Installer omitted Models folder" }
+          $probe = Join-Path $installed "Models\DO-NOT-DELETE-MODELS.txt"
+          Set-Content -Path $probe -Value "Keep model data on updates" -Encoding utf8
+          $second = Start-Process -FilePath $setup -ArgumentList "/S" -Wait -PassThru
+          if ($second.ExitCode -ne 0 -or !(Test-Path $probe)) { throw "Reinstall removed user models" }
+          $smoke = Start-Process -FilePath $exe -ArgumentList "--embedded-self-test" -Wait -PassThru
+          if ($smoke.ExitCode -ne 0) { throw "Installed Milo engine smoke check failed" }
+      - name: Build separately updatable sample module and catalog
+        shell: pwsh
+        run: |
+          Push-Location desktop/modules/system_info
+          Compress-Archive -Path "module.json","plugin.py" -DestinationPath "$env:GITHUB_WORKSPACE/milo-module-system_info-0.1.0.zip"
+          Pop-Location
+          $catalog = @{
+            schema = 1
+            modules = @(
+              @{
+                id = "system_info"
+                version = "0.1.0"
+                name = "System information"
+                asset = "milo-module-system_info-0.1.0.zip"
+                description = "Read-only local platform and disk information"
+              }
+            )
+          }
+          $catalog | ConvertTo-Json -Depth 5 | Set-Content -Path "milo-modules.json" -Encoding utf8
+      - name: Upload Windows installer and optional feature package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Milo-Windows-Installer-0.2.0
+          path: |
+            Milo-Setup-0.2.0.exe
+            milo-module-system_info-0.1.0.zip
+            milo-modules.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish first-party update channel from passing branch HEAD
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $remote = git ls-remote origin "refs/heads/$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) { throw "Unable to check branch tip" }
+          $remoteSha = ($remote -split "\s+")[0]
+          if ($remoteSha -ne $env:GITHUB_SHA) {
+            Write-Host "Skipping stale branch build; current head is $remoteSha"
+            exit 0
+          }
+          gh release view "milo-v0.2.0" --repo BoomForge/colibri *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release milo-v0.2.0 already exists; not overwriting"
+            exit 0
+          }
+          gh release create "milo-v0.2.0" "Milo-Setup-0.2.0.exe" "milo-module-system_info-0.1.0.zip" "milo-modules.json" --repo BoomForge/colibri --target "$env:GITHUB_SHA" --prerelease --title "Milo 0.2.0 — Windows Installer" --notes "Per-user Windows installer: bundled BoomForge Colibri, owner branding, loose GGUF import, collapsed advanced setup, SHA-256 verified update checks, separately versioned feature modules. No model weights or personal memories included. Unsigned preview build."
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Unable to publish GitHub Release. CI installer remains available; built-in updater requires release publication."
+          }
+
