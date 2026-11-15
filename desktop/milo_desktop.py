@@ -4398,6 +4398,20 @@ def ui_self_test() -> int:
                 "PC control and app registry panel did not open")
             control_window.destroy()
             mark("after PC broker panel and deterministic command route")
+            # Drive memory setup is offline until the owner explicitly
+            # authorises an OAuth Desktop app in their own browser.
+            from colibri.milo_core.drive_memory import SCOPES
+            assert SCOPES == ("https://www.googleapis.com/auth/drive.readonly",)
+            read_only_panel = app.drive_memory_window()
+            assert read_only_panel.winfo_exists(), (
+                "Read-only Drive memory setup panel not available")
+            read_only_panel.destroy()
+            if getattr(sys, "frozen", False) and sys.platform == "win32":
+                import google_auth_oauthlib.flow
+                import google.auth.transport.requests
+                assert google_auth_oauthlib.flow.InstalledAppFlow
+                assert google.auth.transport.requests.AuthorizedSession
+            mark("after readonly Drive setup and packaged OAuth imports")
             # The frozen installer must include pystray's native Windows backend,
             # not merely compile the lazy-loading tray wrapper successfully.
             if getattr(sys, "frozen", False) and sys.platform == "win32":
