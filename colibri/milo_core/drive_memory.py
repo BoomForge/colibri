@@ -102,6 +102,8 @@ def save_config(root: Path, folders: list[str]) -> None:
     file = config_path(root)
     file.parent.mkdir(parents=True, exist_ok=True)
     tmp = file.with_suffix(".tmp")
+    if file.is_symlink() or tmp.is_symlink() or file.parent.is_symlink():
+        raise DriveMemoryError("Unsafe local Drive configuration path")
     tmp.write_text(json.dumps({
         "schema": 1, "folders": clean,
         "exclude_sensitive_subfolders": True,
@@ -157,6 +159,8 @@ def _secure_write(path: Path, content: bytes) -> None:
     encrypted = _dpapi(content, decrypt=False)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
+    if path.is_symlink() or tmp.is_symlink() or path.parent.is_symlink():
+        raise DriveMemoryError("Unsafe encrypted Drive storage path")
     try:
         with tmp.open("wb") as file:
             file.write(encrypted)
@@ -331,7 +335,7 @@ def refresh(root: Path, client=None) -> dict:
     if client is None:
         client = DriveReadClient(credentials_for(root))
     conf = load_config(root)
-    rows, visited_ids = [], set()
+    rows, visited_ids, indexed_ids = [], set(), set()
     skipped = 0
     pending = [(pid, 0, True) for pid in conf["folders"]]
     bytes_total = 0
@@ -370,6 +374,9 @@ def refresh(root: Path, client=None) -> dict:
             if bytes_total > MAX_INDEX_TEXT:
                 raise DriveMemoryError("Drive reference memory exceeded the local size budget")
             file_id = root_id(item["id"])
+            if file_id in indexed_ids:
+                continue
+            indexed_ids.add(file_id)
             mime = str(item.get("mimeType", ""))
             origin = str(item.get("webViewLink") or "")
             # Google's own known-format document links, not arbitrary URLs.
@@ -387,6 +394,10 @@ def refresh(root: Path, client=None) -> dict:
         "root_ids": conf["folders"],
         "documents": rows, "skipped": skipped,
     }
+    # A scope edit during a network refresh must never restore data the
+    # owner just excluded or disconnected. Refuse to publish a stale snapshot.
+    if load_config(root)["folders"] != conf["folders"] or not connected(root):
+        raise DriveMemoryError("Drive access changed during refresh; retry after reviewing folders")
     raw = json.dumps(result, ensure_ascii=False).encode("utf-8")
     _secure_write(cache_path(root), zlib.compress(raw, level=6))
     return {"count": len(rows), "skipped": skipped,
