@@ -1,0 +1,390 @@
+{
+  "name": "milo-persistent-life-policy",
+  "schema_version": 1,
+  "status": "design-only",
+  "owner_confirmation_required": true,
+  "implemented": false,
+  "initial_mode": "off",
+  "modes": {
+    "off": {
+      "automatic_tasks": false,
+      "os_notifications": false,
+      "local_inference": false,
+      "description": "No autonomous tasks. Existing manual user actions retain prior broker safeguards."
+    },
+    "quiet": {
+      "automatic_tasks": true,
+      "os_notifications": false,
+      "local_inference": true,
+      "description": "Only bounded, preapproved internal tasks and in-app notices; privileged and network work requires review."
+    },
+    "active": {
+      "automatic_tasks": true,
+      "os_notifications": "opt-in",
+      "local_inference": true,
+      "description": "Additional allowed scheduling and notifications, never additional execution privilege."
+    }
+  },
+  "origins": [
+    "owner_ui",
+    "scheduler",
+    "untrusted_content"
+  ],
+  "decision_values": [
+    "allow",
+    "review",
+    "deny"
+  ],
+  "review_semantics": "requires distinct live owner UI confirmation of exact action and revalidation; not reusable",
+  "defaults_proposed_not_approved": {
+    "task_concurrency": 1,
+    "concurrent_gpu_inference": 1,
+    "notification_channel": "in_app",
+    "timezone": "Australia/Hobart",
+    "background_scheduling_enabled": false,
+    "owner_must_set": [
+      "quiet_hours",
+      "task_budget",
+      "max_daily_notices",
+      "approved_folders",
+      "approved_providers"
+    ],
+    "rationale": "Reasonable safe design defaults; do not activate or infer consent from this contract."
+  },
+  "actor_scope": {
+    "milo": {
+      "may_consult_private_archive_for_chat": true,
+      "may_delegate_private_archive": false
+    },
+    "research": {
+      "private_archive": false
+    },
+    "webdev": {
+      "private_archive": false
+    },
+    "gamedev": {
+      "private_archive": false
+    }
+  },
+  "operations": [
+    {
+      "id": "internal.events.read",
+      "risk": "internal_read",
+      "decision": {
+        "off": "deny",
+        "quiet": "allow",
+        "active": "allow"
+      },
+      "scope": "own ledger",
+      "owner_goal": false,
+      "note": "Trusted system only. Reading through existing user chat follows current UX."
+    },
+    {
+      "id": "internal.events.append",
+      "risk": "internal_write",
+      "decision": {
+        "off": "deny",
+        "quiet": "allow",
+        "active": "allow"
+      },
+      "scope": "life event ledger only",
+      "owner_goal": true,
+      "note": "No writes to approved personal memory, historic source tables, external files."
+    },
+    {
+      "id": "goal.execute_approved",
+      "risk": "internal_read",
+      "decision": {
+        "off": "deny",
+        "quiet": "allow",
+        "active": "allow"
+      },
+      "scope": "bounded existing owner-approved goal",
+      "owner_goal": true,
+      "note": "Cannot expand approved goal, task limits or scopes."
+    },
+    {
+      "id": "model.local_inference",
+      "risk": "model_inference",
+      "decision": {
+        "off": "deny",
+        "quiet": "allow",
+        "active": "allow"
+      },
+      "scope": "configured local model under CPU/GPU budget",
+      "owner_goal": true,
+      "note": "No model install, model change or remote fallback implied."
+    },
+    {
+      "id": "files.scoped_metadata",
+      "risk": "scoped_read",
+      "decision": {
+        "off": "deny",
+        "quiet": "allow",
+        "active": "allow"
+      },
+      "scope": "owner-selected directory and bounded filename metadata",
+      "owner_goal": true,
+      "note": "No whole-drive scans or unscoped content reads."
+    },
+    {
+      "id": "files.read_content",
+      "risk": "scoped_read",
+      "decision": {
+        "off": "deny",
+        "quiet": "review",
+        "active": "review"
+      },
+      "scope": "named local file chosen or scope explicitly approved for content",
+      "owner_goal": true,
+      "note": "Reading personal content is separately reviewed unless explicitly scoped for that task."
+    },
+    {
+      "id": "specialist.delegate",
+      "risk": "specialist_delegate",
+      "decision": {
+        "off": "deny",
+        "quiet": "review",
+        "active": "review"
+      },
+      "scope": "explicit specialist and least-necessary contextual excerpt",
+      "owner_goal": true,
+      "note": "Specialists cannot inherit full Milo persona archive or Drive cache."
+    },
+    {
+      "id": "network.public_read",
+      "risk": "network_read",
+      "decision": {
+        "off": "deny",
+        "quiet": "review",
+        "active": "review"
+      },
+      "scope": "explicitly allowed source/provider, preview of outgoing context",
+      "owner_goal": true,
+      "note": "No silent export of private data; provider must already be enabled."
+    },
+    {
+      "id": "pc.privileged_action",
+      "risk": "privileged_pc",
+      "decision": {
+        "off": "deny",
+        "quiet": "review",
+        "active": "review"
+      },
+      "scope": "exact existing typed PC broker operation",
+      "owner_goal": true,
+      "note": "Review is not enough to call current broker from scheduler. It requires a new explicit owner UI action."
+    },
+    {
+      "id": "memory.promote_personal",
+      "risk": "memory_promote",
+      "decision": {
+        "off": "deny",
+        "quiet": "review",
+        "active": "review"
+      },
+      "scope": "explicit owner-approved note",
+      "owner_goal": true,
+      "note": "Never silently promote reflections or external text to approved memory."
+    },
+    {
+      "id": "external.mutate",
+      "risk": "external_mutation",
+      "decision": {
+        "off": "deny",
+        "quiet": "deny",
+        "active": "deny"
+      },
+      "scope": "out of MVP",
+      "owner_goal": true,
+      "note": "Payments, public messages, email send, account edits, external sharing blocked."
+    },
+    {
+      "id": "permissions.modify",
+      "risk": "privilege_escalation",
+      "decision": {
+        "off": "deny",
+        "quiet": "deny",
+        "active": "deny"
+      },
+      "scope": "out of autonomous runtime",
+      "owner_goal": true,
+      "note": "Only direct owner UI settings under explicit consent; not an agent task."
+    },
+    {
+      "id": "models.install",
+      "risk": "privilege_escalation",
+      "decision": {
+        "off": "deny",
+        "quiet": "deny",
+        "active": "deny"
+      },
+      "scope": "out of autonomous runtime",
+      "owner_goal": true,
+      "note": "Not implied by selecting Quiet or Active."
+    }
+  ],
+  "untrusted_content_cannot": [
+    "authorize",
+    "grant_scope",
+    "change_mode",
+    "execute_broker",
+    "promote_memory",
+    "contact_external_service"
+  ],
+  "event_contract": {
+    "schema_version": 1,
+    "required": [
+      "schema_version",
+      "event_id",
+      "timestamp_utc",
+      "kind",
+      "actor_id",
+      "origin",
+      "evidence_refs",
+      "status",
+      "summary",
+      "idempotency_key"
+    ],
+    "optional": [
+      "goal_id",
+      "task_id",
+      "session_id",
+      "state_before",
+      "state_after",
+      "approval_id"
+    ],
+    "event_kinds": [
+      "goal_created",
+      "task_queued",
+      "task_started",
+      "task_waiting_approval",
+      "approval_granted",
+      "approval_denied",
+      "task_succeeded",
+      "task_failed",
+      "task_interrupted",
+      "task_cancelled",
+      "reflection_proposed",
+      "notification_queued",
+      "room_state"
+    ],
+    "task_states": [
+      "draft",
+      "approved",
+      "queued",
+      "running",
+      "waiting_approval",
+      "succeeded",
+      "failed",
+      "interrupted",
+      "cancelled"
+    ],
+    "data_rules": [
+      "append_only",
+      "no_secret_in_event_summary",
+      "opaque_evidence_refs",
+      "never_success_without_verified_postcondition",
+      "utc_timestamp_no_rewrite",
+      "only_trusted_code_assigns_origin"
+    ]
+  },
+  "negative_scenarios": [
+    {
+      "id": "NEG-01",
+      "vector": "webpage_prompt_injection",
+      "action": "pc.privileged_action",
+      "origin": "untrusted_content",
+      "mode": "active",
+      "expected": "deny"
+    },
+    {
+      "id": "NEG-02",
+      "vector": "model_forged_approval",
+      "action": "pc.privileged_action",
+      "origin": "untrusted_content",
+      "mode": "quiet",
+      "expected": "deny"
+    },
+    {
+      "id": "NEG-03",
+      "vector": "background_unapproved_pc",
+      "action": "pc.privileged_action",
+      "origin": "scheduler",
+      "mode": "quiet",
+      "expected": "review"
+    },
+    {
+      "id": "NEG-04",
+      "vector": "active_public_post",
+      "action": "external.mutate",
+      "origin": "scheduler",
+      "mode": "active",
+      "expected": "deny"
+    },
+    {
+      "id": "NEG-05",
+      "vector": "specialist_private_archive",
+      "action": "specialist.delegate",
+      "origin": "scheduler",
+      "mode": "active",
+      "expected": "review"
+    },
+    {
+      "id": "NEG-06",
+      "vector": "crash_mid_action",
+      "action": "goal.execute_approved",
+      "origin": "scheduler",
+      "mode": "quiet",
+      "expected": "allow"
+    },
+    {
+      "id": "NEG-07",
+      "vector": "mode_off",
+      "action": "goal.execute_approved",
+      "origin": "scheduler",
+      "mode": "off",
+      "expected": "deny"
+    },
+    {
+      "id": "NEG-08",
+      "vector": "provider_disconnected",
+      "action": "network.public_read",
+      "origin": "scheduler",
+      "mode": "quiet",
+      "expected": "review"
+    },
+    {
+      "id": "NEG-09",
+      "vector": "retry_duplicate",
+      "action": "internal.events.append",
+      "origin": "scheduler",
+      "mode": "quiet",
+      "expected": "allow"
+    },
+    {
+      "id": "NEG-10",
+      "vector": "room_fake_busy",
+      "action": "internal.events.read",
+      "origin": "scheduler",
+      "mode": "quiet",
+      "expected": "allow"
+    },
+    {
+      "id": "NEG-11",
+      "vector": "file_prompt_permission_escalation",
+      "action": "permissions.modify",
+      "origin": "untrusted_content",
+      "mode": "active",
+      "expected": "deny"
+    },
+    {
+      "id": "NEG-12",
+      "vector": "old_install_integrity",
+      "action": "internal.events.append",
+      "origin": "scheduler",
+      "mode": "off",
+      "expected": "deny"
+    }
+  ]
+}
