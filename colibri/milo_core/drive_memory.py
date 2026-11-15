@@ -29,7 +29,7 @@ MAX_DEPTH = 5
 MAX_DOCUMENT = 80000
 MAX_INDEX_TEXT = 7_000_000
 MAX_RESPONSE = 11_000_000
-SKIP_FOLDERS = {"optional_private", "primary_sources", "source markdown"}
+SKIP_FOLDERS = {"optional_private", "primary_sources", "source_markdown"}
 FILE_ID = re.compile(r"^[A-Za-z0-9_-]{12,160}$")
 TOKEN_WORD = re.compile(r"[a-z0-9]{3,}", re.I)
 IGNORE = frozenset(("this", "that", "with", "have", "from", "about", "what",
@@ -360,11 +360,9 @@ def refresh(root: Path, client=None) -> dict:
                 else:
                     skipped += 1
                 continue
-            try:
-                content = client.text(item)
-            except DriveMemoryError:
-                skipped += 1
-                continue
+            # A read failure must not silently replace a good existing
+            # snapshot with incomplete data. Retain the last verified index.
+            content = client.text(item)
             if content is None:
                 skipped += 1
                 continue
