@@ -1590,6 +1590,198 @@ class MiloDesktop:
             button.pack(fill="x", padx=24, pady=4)
         return panel
 
+    def drive_memory_window(self):
+        """Read-only Google OAuth, owner-selected folders, manual index refresh."""
+        panel = self._panel(
+            "Google Drive · Extended memory",
+            "Searchable reference memory for Milo. Google Drive is NEVER edited.")
+        explanation = (
+            "OAuth requests drive.readonly (account-wide VIEW access). "
+            "Milo indexes only your selected folder trees. The starting folder "
+            "is Pixelwolf — Sol Reference Library. Optional_Private, "
+            "Primary_Sources, Source Markdown and private subfolders are "
+            "excluded unless selected explicitly.\n"
+            "The snapshot and login token are encrypted for your Windows "
+            "account. No automatic synchronisation or writes; local Milo "
+            "conversations are never sent to Google. SOL notes remain "
+            "source material, NOT Milo's identity or instructions.")
+        tk.Label(panel, text=explanation, bg=PANEL, fg=MUTED,
+                 font=(FONT, 9), wraplength=650, justify="left").pack(
+                     fill="x", padx=22, pady=(14, 12))
+        status = tk.Label(panel, text="", bg=PANEL, fg=FG,
+                          font=(FONT, 10), justify="left",
+                          wraplength=650, anchor="w")
+        status.pack(fill="x", padx=22, pady=(0, 10))
+        tk.Label(panel, text="Folder access list", bg=PANEL, fg=VIOLET,
+                 font=(FONT, 10, "bold")).pack(anchor="w", padx=22)
+        listing = tk.Listbox(
+            panel, bg=BG, fg=FG, selectbackground=EDGE, font=(FONT, 9),
+            height=5, exportselection=False, activestyle="none")
+        listing.pack(fill="x", padx=22, pady=(5, 8))
+
+        def display():
+            if not panel.winfo_exists():
+                return
+            folders = drive_load_config(DATA_DIR)["folders"]
+            listing.delete(0, "end")
+            for id_ in folders:
+                label = SOL_NAME if id_ == SOL_FOLDER else "Owner-selected folder"
+                listing.insert("end", label + " · " + id_)
+            if not drive_connected(DATA_DIR):
+                status.configure(text="Not connected. Select your own Google "
+                                      "Desktop OAuth client JSON to authorise.")
+                return
+            try:
+                snapshot = drive_read_index(DATA_DIR)
+                stamp = snapshot.get("indexed_at") or "Never"
+                status.configure(
+                    text="Read-only connected · "+
+                    str(len(snapshot["documents"]))+" indexed documents · "
+                    "Last refresh "+stamp[:19].replace("T", " ")+
+                    " · skipped "+str(snapshot.get("skipped", 0)))
+            except DriveMemoryError as exc:
+                status.configure(text="Connected; local index unavailable: "+
+                                      str(exc)[:180])
+
+        def add():
+            value = simpledialog.askstring(
+                "Add read-only Drive folder",
+                "Paste a Google Drive folder link or ID. Only select "
+                "folders you want Milo to reference.", parent=panel)
+            if not value:
+                return
+            try:
+                id_ = drive_root_id(value)
+                current = drive_load_config(DATA_DIR)["folders"]
+                if id_ not in current:
+                    drive_save_config(DATA_DIR, current+[id_])
+                    drive_cache_path(DATA_DIR).unlink(missing_ok=True)
+                    self._audit("drive_memory_scope", "completed")
+                display()
+            except (DriveMemoryError, OSError) as exc:
+                messagebox.showerror("Drive folder", str(exc)[:270],
+                                     parent=panel)
+
+        def remove():
+            choice = listing.curselection()
+            current = drive_load_config(DATA_DIR)["folders"]
+            if not choice or choice[0] >= len(current):
+                return
+            if len(current) == 1:
+                messagebox.showinfo(
+                    "Drive scope", "Keep one reference folder, or disconnect "
+                    "to erase the login and the entire local cache.",
+                    parent=panel)
+                return
+            if messagebox.askyesno(
+                    "Remove Drive folder",
+                    "Remove this reference folder and erase the previous "
+                    "snapshot? No Google document will be changed.",
+                    parent=panel):
+                try:
+                    drive_save_config(
+                        DATA_DIR, [x for i, x in enumerate(current)
+                                   if i != choice[0]])
+                    drive_cache_path(DATA_DIR).unlink(missing_ok=True)
+                    self._audit("drive_memory_scope", "revoked")
+                    display()
+                except (DriveMemoryError, OSError) as exc:
+                    messagebox.showerror("Drive scope", str(exc), parent=panel)
+
+        def launch_worker(action, callback):
+            if self.drive_task_active:
+                messagebox.showinfo("Drive memory", "Another Google Drive "
+                                    "operation is still running.", parent=panel)
+                return
+            self.drive_task_active = True
+            status.configure(text=action.title()+" · working locally "
+                                  "or waiting for Google…")
+            def job():
+                try:
+                    result = callback()
+                    self.events.put(("drive_memory_event", action, True, result))
+                except Exception as exc:
+                    # No OAuth tokens, document text or URL contents in errors.
+                    self.events.put((
+                        "drive_memory_event", action, False,
+                        "Google Drive operation failed: "+str(exc)[:250]))
+            threading.Thread(
+                target=job, name="milo-drive-"+action, daemon=True).start()
+
+        def connect():
+            if drive_connected(DATA_DIR):
+                messagebox.showinfo("Google Drive", "Already connected. "
+                                    "Click Refresh to update the reference "
+                                    "snapshot.", parent=panel)
+                return
+            if not messagebox.askyesno(
+                    "Google account READ-ONLY consent",
+                    "Google's drive.readonly OAuth scope permits viewing "
+                    "all files in the account you authorise. Milo's index "
+                    "is limited to the chosen folders and CANNOT write.\n\n"
+                    "You will need a Google Cloud Desktop OAuth client JSON "
+                    "for Milo, then approve the Google sign-in in your browser. "
+                    "The ChatGPT Google connector cannot supply Milo's token. "
+                    "Continue?", parent=panel):
+                return
+            path = filedialog.askopenfilename(
+                title="Choose Google Desktop OAuth client JSON",
+                filetypes=[("Desktop OAuth client", "*.json")],
+                parent=panel)
+            if path:
+                launch_worker("connect", lambda: (
+                    drive_connect(DATA_DIR, Path(path)),
+                    "Connected read-only. Click Refresh to index the chosen "
+                    "Google Drive folders.")[1])
+
+        def refresh():
+            if not drive_connected(DATA_DIR):
+                messagebox.showinfo(
+                    "Google Drive", "Connect a Google account first.",
+                    parent=panel)
+                return
+            def run():
+                outcome = drive_refresh(DATA_DIR)
+                return ("Updated "+str(outcome["count"])+" reference files; "+
+                        str(outcome["skipped"])+" unsupported/excluded. "
+                        "No Drive files were changed.")
+            self._audit("drive_memory_refresh", "approved")
+            launch_worker("refresh", run)
+
+        def disconnect():
+            if self.drive_task_active:
+                return
+            if messagebox.askyesno(
+                    "Disconnect and erase local Drive data",
+                    "Erase the Google token and the entire encrypted "
+                    "reference snapshot from this PC? Your Google files "
+                    "and Milo chat history will not change. Revoke Milo's "
+                    "app permission separately in Google Account security.",
+                    parent=panel):
+                try:
+                    drive_disconnect(DATA_DIR)
+                    self._audit("drive_memory_disconnect", "completed")
+                    display()
+                except (DriveMemoryError, OSError) as exc:
+                    messagebox.showerror("Disconnect", str(exc), parent=panel)
+
+        buttons = tk.Frame(panel, bg=PANEL)
+        buttons.pack(fill="x", padx=22, pady=(2, 12))
+        new_button(buttons, "Add folder", add).pack(side="left")
+        new_button(buttons, "Remove selected", remove).pack(
+            side="left", padx=(7, 0))
+        controls = tk.Frame(panel, bg=PANEL)
+        controls.pack(fill="x", padx=22, pady=(0, 15))
+        new_button(controls, "Connect Google", connect, primary=True).pack(
+            side="left")
+        new_button(controls, "Refresh memory", refresh).pack(
+            side="left", padx=(7, 0))
+        new_button(controls, "Disconnect / erase", disconnect).pack(
+            side="right")
+        self.drive_panel_refresh = display
+        display()
+        return panel
+
     def pc_control_window(self):
         """Owner-selected apps and deliberately scoped, one-time PC actions."""
         panel = self._panel(
