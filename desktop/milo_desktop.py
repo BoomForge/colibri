@@ -1644,6 +1644,11 @@ class MiloDesktop:
                                       str(exc)[:180])
 
         def add():
+            if self.drive_task_active:
+                messagebox.showinfo(
+                    "Drive memory", "Finish the current login or refresh before "
+                    "changing which folders Milo may read.", parent=panel)
+                return
             value = simpledialog.askstring(
                 "Add read-only Drive folder",
                 "Paste a Google Drive folder link or ID. Only select "
@@ -1663,6 +1668,11 @@ class MiloDesktop:
                                      parent=panel)
 
         def remove():
+            if self.drive_task_active:
+                messagebox.showinfo(
+                    "Drive memory", "Finish the current login or refresh before "
+                    "changing folder access.", parent=panel)
+                return
             choice = listing.curselection()
             current = drive_load_config(DATA_DIR)["folders"]
             if not choice or choice[0] >= len(current):
