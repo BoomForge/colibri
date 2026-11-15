@@ -1,0 +1,254 @@
+name: Milo 0.9.8 Windows Installer Preview
+
+on:
+  push:
+    branches:
+      - feature/milo-09-desktop-awareness
+    paths:
+      - ".github/workflows/milo-09-preview-installer.yml"
+      - "desktop/**"
+      - "colibri/milo_core/**"
+      - "tests/test_milo*.py"
+  workflow_dispatch:
+
+concurrency:
+  # Bind a run to its source commit. Delayed push events for older commits
+  # must not cancel a passing installer build of the current branch head.
+  group: milo-09-preview-${{ github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  installable:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get previous VERIFIED first-party Colibri Windows runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: Milo-Bundled-Colibri-Windows
+          run-id: 43552645011
+          github-token: ${{ github.token }}
+          path: cached-fork-runtime
+      - name: Inspect fork runtime integrity and unzip into staged folder
+        shell: pwsh
+        run: |
+          $z = "cached-fork-runtime/Milo-Bundled-Colibri-Windows.zip"
+          if (!(Test-Path $z)) { throw "Pinned first-party runtime artifact missing" }
+          Expand-Archive -Path $z -DestinationPath cached-extracted
+          $qwen = "cached-extracted/Runtime/qwen36.exe"
+          $engine = "cached-extracted/Runtime/colibri.exe"
+          if ((Get-FileHash -Algorithm SHA256 $qwen).Hash.ToLower() -ne "3a159ea141da24bb15ac49fa2b45e1140ffea43ba83f3368748c0886b5b438ae") { throw "Qwen engine checksum changed" }
+          if ((Get-FileHash -Algorithm SHA256 $engine).Hash.ToLower() -ne "62b2805e99ee2041a0b45f3d69c31c2439ef6926d41c718e97c23c956b146cba") { throw "Colibri engine checksum changed" }
+          $engines = @(Get-ChildItem -Path "cached-extracted/Runtime" -Filter "*.exe")
+          if ($engines.Count -ne 13) { throw "Fork runtime has wrong engine count" }
+          if (!(Test-Path "cached-extracted/Runtime/tools/gguf_import.py")) { throw "Missing original Colibri GGUF importer" }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python packager and Windows icon support
+        shell: pwsh
+        run: |
+          python -m pip install "pyinstaller>=6.10,<7" "cryptography>=42,<51" "Pillow>=11,<13" "pypdf>=5,<7" "python-docx>=1.1,<2" "tkinterdnd2==0.7.0" "pystray==0.19.5" "google-auth>=2.40,<3" "google-auth-oauthlib>=1.4.1,<2" "requests>=2.32,<3"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build official Milo ICO from uploaded owner artwork
+        shell: pwsh
+        run: |
+          @'
+          from PIL import Image
+          from pathlib import Path
+          src = Path("desktop/assets/milo_profile.png")
+          image = Image.open(src).convert("RGBA")
+          image.save("desktop/assets/Milo.ico", sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])
+          assert Path("desktop/assets/Milo.ico").stat().st_size > 2000
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run synthetic Milo tests on Windows
+        shell: pwsh
+        run: |
+          python -m compileall -q colibri/milo_core desktop/milo_desktop.py desktop/model_import_service.py desktop/colibri_service.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p "test_milo*.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m desktop.milo_desktop --ui-self-test
+          if ($LASTEXITCODE -ne 0) {
+            $trace = Join-Path $env:TEMP "milo-ui-diagnostics.log"
+            if (Test-Path $trace) { Get-Content $trace | Select-Object -Last 100 | Write-Host }
+            throw "Python source native GUI smoke failed"
+          }
+      - name: Build current Milo.exe with embedded modules and icon
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name Milo --icon desktop/assets/Milo.ico --paths . --paths c --hidden-import openai_server --hidden-import family_registry --hidden-import gguf_reader --hidden-import resource_plan --hidden-import autotune --hidden-import image_engine --hidden-import v4_dsml --hidden-import v41_dsml --hidden-import cluster --hidden-import setup_catalog --hidden-import setup_hw --collect-all cryptography --collect-all pypdf --collect-all docx --collect-all tkinterdnd2 --collect-all pystray --hidden-import pystray._win32 --collect-submodules google_auth_oauthlib --collect-submodules google.auth --collect-submodules google.oauth2 --collect-submodules requests --collect-all certifi desktop/milo_desktop.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Combine current app with pinned first-party Colibri runtime
+        shell: pwsh
+        run: |
+          Copy-Item "cached-extracted/Runtime" -Destination "dist/Milo/Runtime" -Recurse
+          Copy-Item "cached-extracted/Models" -Destination "dist/Milo/Models" -Recurse
+          New-Item -ItemType Directory -Path "dist/Milo/Assets" -Force | Out-Null
+          Copy-Item "desktop/assets/milo_profile.png" "dist/Milo/Assets/milo_profile.png"
+          Copy-Item "desktop/assets/Milo.ico" "dist/Milo/Assets/Milo.ico"
+          New-Item -ItemType Directory -Path "dist/Milo/Assets/specialists" -Force | Out-Null
+          $avatars = @{
+            "sage"="c08d72d51cf77488718aa67ec567de627355446bfd6fc1875707975f2daedad7"
+            "nova"="89efb1ae36af8a4a9cbe63fbaf457ef9886039df643c81ecfa118cb5858fe717"
+            "forge"="5df0da47992d98a0409cb578eea7b0c7372ab9625f2dd31b42b3879215ee8290"
+          }
+          foreach ($id in $avatars.Keys) {
+            $src = "desktop/assets/specialists/$id.webp"
+            if (!(Test-Path $src)) { throw "Missing $id avatar" }
+            $digest = (Get-FileHash -Algorithm SHA256 $src).Hash.ToLowerInvariant()
+            if ($digest -ne $avatars[$id]) { throw "Source avatar hash mismatch: $id" }
+            Copy-Item $src "dist/Milo/Assets/specialists/$id.webp"
+            if (!(Test-Path "dist/Milo/Assets/specialists/$id.webp")) {
+              throw "Bundled $id avatar missing"
+            }
+          }
+          @(
+            "Runtime engines built from fork commit 449ecba1eeb954816de0eb6fc207fdc7cb1027ad",
+            "Current Milo application commit: $env:GITHUB_SHA"
+          ) | Set-Content "dist/Milo/Runtime/MILO-BUILD-PROVENANCE.txt"
+      - name: Test both GUI and embedded runtime in standalone Windows binary
+        shell: pwsh
+        run: |
+          foreach ($id in @("sage", "nova", "forge")) {
+            if (!(Test-Path "dist/Milo/Assets/specialists/$id.webp")) {
+              throw "Installer stage omitted specialist portrait $id"
+            }
+          }
+          $exe = (Resolve-Path "dist/Milo/Milo.exe").Path
+          foreach ($arg in @("--self-test", "--embedded-self-test", "--ui-self-test")) {
+            Write-Host "Testing bundled Milo $arg"
+            $p = Start-Process -FilePath $exe -ArgumentList $arg -PassThru
+            if (!$p.WaitForExit(25000)) {
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              $trace = Join-Path $env:TEMP "milo-ui-diagnostics.log"
+              if (Test-Path $trace) { Get-Content $trace | Select-Object -Last 100 | Write-Host }
+              throw "Bundled Milo $arg timed out (possible UI deadlock)"
+            }
+            if ($p.ExitCode -ne 0) {
+              $trace = Join-Path $env:TEMP "milo-ui-diagnostics.log"
+              if (Test-Path $trace) { Get-Content $trace | Select-Object -Last 100 | Write-Host }
+              throw "Milo binary failed $arg with exit $($p.ExitCode)"
+            }
+          }
+      - name: Compile actual Windows installer using NSIS
+        shell: pwsh
+        run: |
+          $compiler = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (!(Test-Path $compiler)) {
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "NSIS install failed" }
+          }
+          & $compiler /V3 "desktop/install/Milo.nsi"
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path "Milo-Setup-0.9.8.exe")) { throw "NSIS build failed" }
+      - name: Test real installer and upgrade preserving models
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "Milo-Setup-0.9.8.exe").Path
+          $first = Start-Process -FilePath $exe -ArgumentList "/S" -Wait -PassThru
+          if ($first.ExitCode -ne 0) { throw "Installer returned $($first.ExitCode)" }
+          $installed = Join-Path $env:LOCALAPPDATA "Programs/Milo"
+          $installedExe = Join-Path $installed "Milo.exe"
+          if (!(Test-Path $installedExe)) { throw "Milo.exe missing from installation" }
+          foreach ($id in @("sage", "nova", "forge")) {
+            $portrait = Join-Path $installed "Assets/specialists/$id.webp"
+            if (!(Test-Path $portrait)) {
+              throw "Installed Milo missing $id portrait"
+            }
+          }
+          $modelTest = Join-Path $installed "Models/preserve-user-models.txt"
+          Set-Content $modelTest "Leave my checkpoints in place" -Encoding UTF8
+          $second = Start-Process -FilePath $exe -ArgumentList "/S" -Wait -PassThru
+          if ($second.ExitCode -ne 0 -or !(Test-Path $modelTest)) { throw "Model data lost after upgrade" }
+          # Silent installations used by CI must not relaunch the desktop GUI.
+          if (Get-Process Milo -ErrorAction SilentlyContinue) {
+            throw "Silent setup unexpectedly started Milo.exe"
+          }
+          # Model the PID-aware updater handoff without any private app data.
+          $held = Start-Process -FilePath "powershell.exe" -ArgumentList @(
+            "-NoProfile", "-NonInteractive", "-Command",
+            "Start-Sleep -Seconds 5") -PassThru
+          try {
+            $clock = [System.Diagnostics.Stopwatch]::StartNew()
+            $pidInstaller = Start-Process -FilePath $exe -ArgumentList @(
+              "/S", "/WAITFORPID=$($held.Id)") -Wait -PassThru
+            $clock.Stop()
+            if ($pidInstaller.ExitCode -ne 0) {
+              throw "PID-aware reinstall failed"
+            }
+            if ($clock.Elapsed.TotalSeconds -lt 2.5) {
+              throw "Installer did not wait for previous process exit"
+            }
+            if (!(Test-Path $modelTest)) {
+              throw "PID-aware reinstall did not preserve Models"
+            }
+            if (Get-Process Milo -ErrorAction SilentlyContinue) {
+              throw "PID-aware silent setup unexpectedly relaunched Milo"
+            }
+          } finally {
+            if (!$held.HasExited) {
+              Stop-Process -Id $held.Id -Force -ErrorAction SilentlyContinue
+            }
+          }
+          foreach ($arg in @("--embedded-self-test", "--ui-self-test")) {
+            Write-Host "Testing installed Milo $arg"
+            $p = Start-Process -FilePath $installedExe -ArgumentList $arg -PassThru
+            if (!$p.WaitForExit(25000)) {
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              throw "Installed Milo $arg timed out"
+            }
+            if ($p.ExitCode -ne 0) { throw "Installed app failed $arg" }
+          }
+      - name: Package optional module catalog
+        shell: pwsh
+        run: |
+          Push-Location "desktop/modules/system_info"
+          Compress-Archive -Path "module.json","plugin.py" -DestinationPath "$env:GITHUB_WORKSPACE/milo-module-system_info-0.1.0.zip"
+          Pop-Location
+          @{
+            schema=1
+            modules=@(@{
+              id="system_info"
+              name="System information"
+              version="0.1.0"
+              asset="milo-module-system_info-0.1.0.zip"
+              description="Optional read-only system information"
+            })
+          } | ConvertTo-Json -Depth 5 | Set-Content "milo-modules.json" -Encoding UTF8
+      - name: Upload actual installer and independently updateable feature package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Milo-Installer-0.9.8-Preview
+          path: |
+            Milo-Setup-0.9.8.exe
+            milo-module-system_info-0.1.0.zip
+            milo-modules.json
+          retention-days: 30
+          if-no-files-found: error
+      - name: Publish tested 0.9 release for in-app updater
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/milo-09-desktop-awareness'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tip = git ls-remote origin "refs/heads/$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tip)) { throw "Cannot verify branch" }
+          $tipSha = ($tip -split '\s+')[0].ToLowerInvariant()
+          if ($tipSha -ne $env:GITHUB_SHA.ToLowerInvariant()) { Write-Host "Stale build; skip publication"; exit 0 }
+          gh release view milo-v0.9.8 --repo BoomForge/colibri 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { Write-Host "Release already exists; leaving it unchanged"; exit 0 }
+          $exe = "Milo-Setup-0.9.8.exe"
+          if (!(Test-Path $exe)) { throw "Verified installer missing" }
+          $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
+          "$hash  $exe" | Set-Content Milo-0.9.8-SHA256.txt -Encoding ascii
+          $notes = "Milo 0.9.8 Windows preview: Google Drive READ-ONLY extended reference memory. Separate user-authorised Desktop OAuth, encrypted Windows-user token and cache, selected folder trees starting at the Pixelwolf SOL Reference Library, sensitive subfolder exclusion, source-labelled on-demand memory retrieval, manual refresh, and disconnect. No Google document edits or unsanctioned background sync. Preserves existing PC tools, specialists, tray and automatic relaunch. Unsigned prerelease; verify checksum, back up Milo data and Models. Installer SHA-256: $hash. Commit: $env:GITHUB_SHA."
+          gh release create milo-v0.9.8 $exe milo-modules.json milo-module-system_info-0.1.0.zip Milo-0.9.8-SHA256.txt --repo BoomForge/colibri --target "$env:GITHUB_SHA" --prerelease --title "Milo 0.9.8 Windows Preview" --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw "Release upload failed" }
+          gh release view milo-v0.9.8 --repo BoomForge/colibri --json tagName,assets,isDraft,isPrerelease
+          if ($LASTEXITCODE -ne 0) { throw "Cannot confirm release" }

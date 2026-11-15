@@ -105,7 +105,8 @@ def attachment_context(files: list[Attachment]) -> tuple[str, bool]:
             lines.append(
                 f"[Image attachment: {file.name}]\n"
                 "Pixels NOT supplied to this text model. Do not claim to see, "
-                "describe or analyse image contents.")
+                "describe or analyse image contents without a separate, "
+                "explicitly approved, source-labelled local vision result.")
             continue
         extracted = extract_text(file.path)
         budget = min(MAX_MESSAGE_CONTEXT - total, 5000)

@@ -20,6 +20,7 @@ import time
 from datetime import datetime
 from urllib.request import urlopen
 import uuid
+import webbrowser
 
 import tkinter as tk
 try:
@@ -30,9 +31,38 @@ except ImportError:
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from desktop.chat_view import ChatView, ConversationList, COLORS, avatar_widget, AvatarBank
 
+from colibri.milo_core.vision import (
+    OllamaLocalVision, VisionError, vision_context,
+)
+from colibri.milo_core.windows_actions import (
+    WindowsAction, available_actions, parse_action_request, execute_action,
+)
+from colibri.milo_core.pc_broker import (
+    PCActionError, PCPlan, parse_pc_request, prepare_pc_plan,
+    plan_discovered_launch, execute_pc_plan, load_apps, register_app, remove_app,
+)
+from colibri.milo_core.app_discovery import find_installed_apps, AppMatch
+from colibri.milo_core.global_hotkey import GlobalQuickChatHotkey
+from colibri.milo_core.tool_activity import (
+    init_activity, record_activity, list_activity, clear_activity,
+)
+from desktop.screen_capture import capture_primary_screen, ScreenCaptureError
+from desktop.tray_service import MiloTray
 from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
+from colibri.milo_core.drive_memory import (
+    DriveMemoryError, SOL_FOLDER, SOL_NAME,
+    connected as drive_connected, connect as drive_connect,
+    disconnect as drive_disconnect, refresh as drive_refresh,
+    load_config as drive_load_config, save_config as drive_save_config,
+    root_id as drive_root_id, cache_path as drive_cache_path,
+    read_index as drive_read_index, search_memory as drive_search_memory,
+    model_context as drive_model_context,
+)
 from colibri.milo_core.filesystem import find_files_by_prefix
+from colibri.milo_core.file_operations import (
+    FileMoveError, plan_file_moves, execute_file_moves,
+)
 from colibri.milo_core.chat_files import parse_file_query, answer_file_query
 from colibri.milo_core.desktop_actions import (
     parse_open_request, locate_file, validate_preview_path,
@@ -76,7 +106,7 @@ from colibri.milo_core.bots import (
     Bot, ChatSettings, attributed_messages, chat_settings,
     get_bot, init_bot_schema, list_bots, model_for_turn,
     resolve_target, save_bot, set_bot_active, set_chat_settings,
-    delete_conversation,
+    delete_conversation, public_handle, SPECIALIST_HANDLES,
 )
 from colibri.milo_core.specialist_presets import ensure_specialists
 from colibri.milo_core.updates import (
@@ -108,6 +138,7 @@ DB_PATH = DATA_DIR / "memory.sqlite3"
 CONFIG_PATH = DATA_DIR / "settings" / "preferences.json"
 AVATARS = DATA_DIR / "avatars"
 DOCUMENTS = DATA_DIR / "documents"
+PC_APPS = DATA_DIR / "settings" / "pc_apps.json"
 ORIGINAL_ARCHIVES = DATA_DIR / "original_archives"
 BRAND_AVATAR = install_root() / "Assets" / "milo_profile.png"
 BRAND_ICON = install_root() / "Assets" / "Milo.ico"
@@ -122,6 +153,10 @@ DEFAULTS = {
     "model_directory": "",
     "model_location": "",
     "backend": "vulkan",
+    "global_shortcut": "on",
+    "vision_enabled": "off",
+    "vision_model": "qwen3-vl:2b",
+    "vision_endpoint": "http://127.0.0.1:11434",
 }
 
 
@@ -222,15 +257,33 @@ class MiloDesktop:
         ensure_specialists(self.db.db, self.models_root)
         init_documents(self.db.db)
         init_web_prefs(self.db.db)
+        init_activity(self.db.db)
         DOCUMENTS.mkdir(parents=True, exist_ok=True)
         self.active_model_location = ""
         self.loading_model_location = ""
         self.pending_send = None
         self.events: queue.Queue[tuple] = queue.Queue()
+        self.tray = MiloTray(self.events, BRAND_ICON, BRAND_AVATAR)
+        self._tray_hidden_panels = []
+        self._exiting = False
+        self.quick_hotkey = GlobalQuickChatHotkey(self.events)
+        self.session_captures: list[Path] = []
+        self.active_tool: str | None = None
+        capture_folder = DATA_DIR / "captures"
+        if capture_folder.exists() and not capture_folder.is_symlink():
+            # Screenshots are temporary; remove orphaned images from old sessions.
+            for old in capture_folder.glob("screen-*.png"):
+                if old.is_file() and not old.is_symlink():
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
         self.busy = False
         self.cancel = threading.Event()
         self.model_download_cancel = threading.Event()
         self.model_download_active = False
+        self.drive_task_active = False
+        self.drive_panel_refresh = None
         self.models: list[str] = []
         self.images = {}
         self.release_candidate = None
@@ -248,7 +301,15 @@ class MiloDesktop:
         self._refresh_chat_context()
         self._ensure_chat_model()
         self.root.after(70, self._pump)
-        self.root.protocol("WM_DELETE_WINDOW", self._close)
+        # Close (X / Alt+F4) and the minimise button leave Milo running.
+        # The only normal quit action is "Close Milo" in the tray menu.
+        self.root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+        self.root.bind("<Unmap>", self._on_main_unmap, add="+")
+        if "--ui-self-test" not in sys.argv:
+            self.tray.start()
+        if ("--ui-self-test" not in sys.argv
+                and self.config.get("global_shortcut") == "on"):
+            self.quick_hotkey.start()
 
     def _build(self):
         self.side = tk.Frame(self.root, bg=SIDEBAR, width=260,
@@ -273,6 +334,7 @@ class MiloDesktop:
             background=SIDEBAR)
         self.chat_list.pack(fill="both", expand=True, padx=(5, 5))
         self.root.bind("<Control-k>", lambda _e: self.search_conversations())
+        self.root.bind("<Control-Shift-m>", lambda _e: self.show_quick_chat())
 
         search_chats = new_button(
             self.side, "⌕   Search conversations (Ctrl+K)",
@@ -298,9 +360,14 @@ class MiloDesktop:
         actions = [
             ("Models", self.models_window, "models"),
             ("Updates & modules", self.updates_modules_window, None),
+            ("Tool activity", self.activity_window, None),
             ("Memory", self.memory_window, "memory"),
+            ("Google Drive memory", self.drive_memory_window, "drive_memory"),
             ("Restore Milo personality", self.restore_milo_personality, "memory"),
             ("Find files", self.find_files_window, "files"),
+            ("Organise files", self.organise_files_window, "files"),
+            ("Windows tools", self.windows_tools_window, "files"),
+            ("PC control", self.pc_control_window, "files"),
             ("Ask SOL", self.sol_window, "sol"),
             ("Back up / Restore", self.backup_window, "backup"),
             ("Settings", self.settings_window, None),
@@ -363,6 +430,11 @@ class MiloDesktop:
         self.connection_label = tk.Label(label_stack, text="Checking local model...",
                                          bg=PANEL, fg=MUTED, font=(FONT, 9))
         self.connection_label.pack(anchor="w", pady=(3, 0))
+        quick_button = new_button(
+            heading, "Quick chat  Ctrl+Shift+M", self.show_quick_chat)
+        quick_button.configure(bg=PANEL_BRIGHT, fg=VIOLET,
+                               padx=9, pady=6, font=(FONT, 9))
+        quick_button.pack(side="right", padx=(0, 6), pady=17)
         reconnect = new_button(heading, "↻  Reconnect", self.check_connection)
         reconnect.configure(bg=PANEL_BRIGHT, fg=MUTED,
                             padx=12, pady=6, font=(FONT, 9))
@@ -414,31 +486,44 @@ class MiloDesktop:
         attach.configure(bg=PANEL, fg=VIOLET,
                          padx=7, pady=7, font=(FONT, 9))
         attach.pack(side="left", padx=(0, 2), pady=7)
+        capture = new_button(composer, "▣ Screen", self.capture_screen)
+        capture.configure(bg=PANEL, fg=VIOLET,
+                          padx=7, pady=7, font=(FONT, 9))
+        capture.pack(side="left", padx=(0, 2), pady=7)
+        # Reserve the action buttons BEFORE the expanding text field.
+        # Tk packs children in creation order: previously the 80-column
+        # Text widget consumed all width, pushing Send/Stop offscreen, while
+        # stacked action buttons made the whole composer ~90px high.
+        actions = tk.Frame(composer, bg=PANEL)
+        actions.pack(side="right", padx=(4, 7), pady=3)
+        self.send_button = new_button(actions, "Send  ➤", self.send, primary=True)
+        self.send_button.configure(padx=10, pady=4)
+        self.send_button.pack(side="right", padx=(4, 0))
+        self.stop_button = new_button(actions, "Stop", self.stop)
+        self.stop_button.configure(bg=PANEL_BRIGHT, fg=MUTED,
+                                   font=(FONT, 9), padx=7, pady=4)
+        self.stop_button.pack(side="right")
+        self.stop_button.configure(state="disabled")
+
         self.entry = tk.Text(
-            composer, height=2, wrap="word", font=(FONT, 11),
+            composer, width=24, height=1, wrap="word", font=(FONT, 11),
             bg=PANEL, fg=FG, insertbackground=VIOLET,
             selectbackground=ACCENT, selectforeground=FG,
             relief="flat", highlightthickness=0, borderwidth=0,
-            padx=12, pady=10, undo=True)
-        self.entry.pack(side="left", fill="both", expand=True, padx=(3, 0), pady=3)
+            padx=8, pady=5, undo=True)
+        self.entry.pack(side="left", fill="both", expand=True,
+                        padx=(3, 0), pady=2)
         self.entry.bind("<Return>", self._enter_key)
-        self.entry_hint = "Message Milo…"
+        self.entry_hint = "Message Milo or @sage / @nova / @forge…"
         self.entry_placeholder = False
         self._show_composer_hint()
         self.entry.bind("<FocusIn>", self._composer_focus_in)
         self.entry.bind("<FocusOut>", self._composer_focus_out)
         self.entry.bind("<Control-a>", self._composer_select_all)
-
-        actions = tk.Frame(composer, bg=PANEL)
-        actions.pack(side="right", padx=(6, 9), pady=8)
-        self.send_button = new_button(actions, "Send  ➤", self.send, primary=True)
-        self.send_button.configure(padx=15, pady=7)
-        self.send_button.pack(fill="x", pady=(0, 5))
-        self.stop_button = new_button(actions, "Stop", self.stop)
-        self.stop_button.configure(bg=PANEL_BRIGHT, fg=MUTED,
-                                   font=(FONT, 9), padx=8, pady=5)
-        self.stop_button.pack(fill="x")
-        self.stop_button.configure(state="disabled")
+        # Any edit, paste, or programmatic clear reflows 1–4 visible lines.
+        self.entry.bind("<<Modified>>", self._composer_modified)
+        self.entry.bind("<Configure>", self._composer_resized)
+        self.entry.edit_modified(False)
         attach_row = tk.Frame(main, bg=BG)
         attach_row.pack(fill="x", padx=19, pady=(0, 2))
         self.attachment_status = tk.Label(
@@ -505,7 +590,18 @@ class MiloDesktop:
         if bot is None:
             return (AVATARS / self.config["avatar_milo"]
                     if self.config.get("avatar_milo") else BRAND_AVATAR)
-        return AVATARS / bot.avatar if bot.avatar else None
+        # User-selected portraits win; bundled art is a read-only fallback.
+        if bot.avatar:
+            return AVATARS / bot.avatar
+        if bot.id in SPECIALIST_HANDLES:
+            filename = public_handle(bot.id) + ".webp"
+            bundled = self.install_root / "Assets" / "specialists" / filename
+            if bundled.is_file():
+                return bundled
+            source = Path(__file__).resolve().parent / "assets" / "specialists" / filename
+            if source.is_file():
+                return source
+        return None
 
     def _bot_row(self, bot_id, name, meta, *, avatar=None, disabled=False):
         row = tk.Frame(self.bot_inner, bg=SIDEBAR)
@@ -564,7 +660,7 @@ class MiloDesktop:
                     anchor="w", padx=17, pady=(18, 4))
         for bot in active_bots:
             self._bot_row(bot.id, bot.name,
-                          ("@" + bot.id + (" · DISABLED" if not bot.active
+                          ("@" + public_handle(bot.id) + (" · DISABLED" if not bot.active
                                           else " · PRIVATE DM")),
                           avatar=self._bot_avatar_path(bot), disabled=not bot.active)
 
@@ -681,7 +777,8 @@ class MiloDesktop:
             "Each bot has its own instructions and optional model. "
             "Specialists do not automatically inherit Milo's private memories.")
         panel.geometry("635x780")
-        handle = tk.StringVar(value=existing.id if existing else "")
+        handle = tk.StringVar(
+            value=public_handle(existing.id) if existing else "")
         display = tk.StringVar(value=existing.name if existing else "")
         enabled = tk.BooleanVar(value=existing.active if existing else True)
         avatar_path = [existing.avatar if existing else ""]
@@ -754,7 +851,7 @@ class MiloDesktop:
                     anchor="w", padx=24, pady=(4, 3))
         def save():
             try:
-                handle_id = handle.get().strip().lower()
+                handle_id = existing.id if existing else handle.get().strip().lower()
                 raw_instructions = instructions.get("1.0", "end-1c").strip()
                 chosen_model = ("" if model.get() == choices[0] else model.get())
                 if chosen_model and chosen_model not in self._installed_model_choices():
@@ -829,7 +926,7 @@ class MiloDesktop:
         if bot is not None:
             self.milo_title.configure(text=bot.name)
             self.persona_status_label.configure(text="SPECIALIST BOT", fg=ORANGE)
-            self.channel_label.configure(text="PRIVATE · @" + bot.id)
+            self.channel_label.configure(text="PRIVATE · @" + public_handle(bot.id))
             image_path = self._bot_avatar_path(bot)
             self.chat_view.names["assistant"] = bot.name
             self.chat_view.paths["assistant"] = image_path
@@ -873,9 +970,12 @@ class MiloDesktop:
                                      width=3, height=1)
             return
         try:
-            picture = tk.PhotoImage(file=path)
-            factor = max(1, (max(picture.width(), picture.height()) + 49) // 50)
-            picture = picture.subsample(factor)
+            # Pillow loads bundled WebP portraits; native Tk PhotoImage cannot.
+            from PIL import Image, ImageTk
+            with Image.open(path) as source:
+                image = source.convert("RGBA")
+                image.thumbnail((50, 50), Image.Resampling.LANCZOS)
+                picture = ImageTk.PhotoImage(image)
             self.images["bot_header"] = picture
             self.milo_icon.configure(image=picture, text="",
                                      width=50, height=50)
@@ -951,6 +1051,33 @@ class MiloDesktop:
             self.entry.tag_add("sel", "1.0", "end-1c")
         return "break"
 
+    def _composer_modified(self, _event=None):
+        if self.entry.edit_modified():
+            self.entry.edit_modified(False)
+            self.entry.after_idle(self._resize_composer)
+
+    def _composer_resized(self, _event=None):
+        # Recalculate wrapped display lines when the user resizes the window.
+        self.entry.after_idle(self._resize_composer)
+
+    def _resize_composer(self):
+        if not self.entry.winfo_exists():
+            return
+        try:
+            if self.entry_placeholder:
+                rows = 1
+            else:
+                # Counting displaylines includes word wrapping, not just
+                # explicit Shift+Enter newlines. The 4-row cap preserves
+                # conversation space and allows the text widget to scroll.
+                count = self.entry.count("1.0", "end-1c", "displaylines")
+                rows = min(4, max(1, 1 + (count[0] if count else 0)))
+            if int(self.entry.cget("height")) != rows:
+                self.entry.configure(height=rows)
+        except tk.TclError:
+            # The Tk text window may be closing during an idle callback.
+            pass
+
     def _enter_key(self, event):
         if event.state & 0x1:  # Shift+Enter
             return None
@@ -993,7 +1120,7 @@ class MiloDesktop:
             chat_mode = chat_settings(self.db.db, self.current_chat)
             if chat_mode.kind == "private" and chat_mode.bot_id != "milo":
                 archive_notice = (
-                    "Private chat with @" + chat_mode.bot_id + ". "
+                    "Private chat with @" + public_handle(chat_mode.bot_id) + ". "
                     "This specialist does not inherit Milo's archived "
                     "relationship memories or private memory notes.\n"
                 )
@@ -1010,11 +1137,19 @@ class MiloDesktop:
                 + archive_notice + "Start a message below.", "notice"
             )
         for role, text, date, author_id, author_name, avatar in rows:
+            # Historical provenance remains untouched in SQLite. Display the
+            # current specialist identity and bundled art where appropriate.
+            display_bot = (get_bot(self.db.db, author_id)
+                           if role == "assistant" and author_id in SPECIALIST_HANDLES
+                           else None)
             self._display_turn(
                 role, text, date,
                 author_id=author_id if role == "assistant" else None,
-                author_name=author_name if role == "assistant" else None,
-                avatar=(AVATARS / avatar if avatar else None))
+                author_name=(display_bot.name if display_bot else author_name)
+                            if role == "assistant" else None,
+                avatar=(AVATARS / avatar if avatar else
+                        self._bot_avatar_path(display_bot)
+                        if display_bot else None))
         self.chat_view.show_latest()
 
     def _refresh_chat_list(self):
@@ -1027,19 +1162,27 @@ class MiloDesktop:
             "FROM conversations c LEFT JOIN chat_settings s ON c.chat_id=s.chat_id "
             "GROUP BY c.chat_id ORDER BY MAX(c.id) DESC LIMIT 100"
         ).fetchall()
+        chat_avatars = {}
         for chat_id, title, kind, bot_id in rows:
             if kind == "private":
                 bot = get_bot(self.db.db, bot_id) if bot_id != "milo" else None
-                title = "@" + bot_id + " · " + title
+                if bot:
+                    chat_avatars[chat_id] = self._bot_avatar_path(bot)
+                title = "@" + public_handle(bot_id) + " · " + title
             else:
                 title = "# " + title
             self.chats.append((chat_id, title))
         if self.current_chat not in {x[0] for x in self.chats}:
             context = chat_settings(self.db.db, self.current_chat)
-            title = ("DM @" + context.bot_id if context.kind == "private"
+            title = ("DM @" + public_handle(context.bot_id) if context.kind == "private"
                      else "# New conversation")
             self.chats.insert(0, (self.current_chat, title))
-        self.chat_list.set_chats(self.chats, self.current_chat)
+            if context.kind == "private" and context.bot_id != "milo":
+                bot = get_bot(self.db.db, context.bot_id)
+                if bot:
+                    chat_avatars[self.current_chat] = self._bot_avatar_path(bot)
+        self.chat_list.set_chats(
+            self.chats, self.current_chat, avatar_by_chat=chat_avatars)
 
     def _select_chat(self, selected):
         if self.busy:
@@ -1292,7 +1435,703 @@ class MiloDesktop:
 
     def clear_attachments(self):
         self.queued_attachments = []
+        # Screenshots are private, short-lived scratch files. Staged copies
+        # remain in the conversation's attachment store if already sent.
+        for path in self.session_captures:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.session_captures.clear()
         self._update_attachment_status()
+
+    # ---- Global quick chat, consented screen attachment and activity ----
+
+    def _audit(self, tool: str, outcome: str) -> None:
+        """Fixed-label event only. Do not put user prompts or paths in this log."""
+        try:
+            record_activity(self.db.db, tool, outcome)
+        except sqlite3.Error:
+            pass
+
+    def _tool_begin(self, tool: str) -> None:
+        self.active_tool = tool
+        self._audit(tool, "started")
+
+    def _tool_finish(self, outcome: str) -> None:
+        tool = self.active_tool
+        self.active_tool = None
+        if tool:
+            self._audit(tool, outcome)
+
+    def show_quick_chat(self):
+        """Small, separate composition window; same chat and model as main UI."""
+        existing = getattr(self, "quick_popup", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
+        panel = tk.Toplevel(self.root)
+        self.quick_popup = panel
+        panel.title("Quick chat · Milo")
+        panel.configure(bg=BG)
+        panel.geometry("560x185")
+        panel.minsize(420, 160)
+        panel.attributes("-topmost", True)
+        tk.Label(panel, text="MILO · QUICK CHAT", bg=BG, fg=VIOLET,
+                 font=(FONT, 10, "bold")).pack(anchor="w", padx=18, pady=(14, 5))
+        text_entry = tk.Text(panel, height=3, wrap="word", font=(FONT, 11),
+                             bg=PANEL, fg=FG, insertbackground=VIOLET,
+                             relief="flat", padx=10, pady=8)
+        text_entry.pack(fill="both", expand=True, padx=18, pady=(0, 6))
+        footer = tk.Frame(panel, bg=BG)
+        footer.pack(fill="x", padx=18, pady=(0, 12))
+
+        def submit(_event=None):
+            prompt = text_entry.get("1.0", "end-1c").strip()
+            if not prompt:
+                return "break"
+            if self.busy:
+                messagebox.showinfo("Milo is responding",
+                    "Finish or stop the current response first. "
+                    "Your quick-chat text will stay here.", parent=panel)
+                return "break"
+            if len(prompt) > 20000:
+                messagebox.showerror("Message too long",
+                                     "Keep messages below 20,000 characters.",
+                                     parent=panel)
+                return "break"
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self.entry.delete("1.0", "end")
+            self.entry_placeholder = False
+            self.entry.configure(fg=FG)
+            self.entry.insert("1.0", prompt)
+            panel.destroy()
+            self.quick_popup = None
+            self._audit("quick_chat", "completed")
+            self.send()
+            return "break"
+
+        text_entry.bind("<Return>",
+            lambda event: None if event.state & 0x1 else submit(event))
+        panel.bind("<Escape>", lambda _event: panel.destroy())
+        tk.Label(footer, text="Enter to send · Shift+Enter for newline",
+                 bg=BG, fg=MUTED, font=(FONT, 8)).pack(side="left")
+        new_button(footer, "Send to Milo", submit, primary=True).pack(side="right")
+        panel.after(50, text_entry.focus_set)
+
+    def capture_screen(self):
+        """Every capture needs consent; no permanent screen-watch capability."""
+        if len(self.queued_attachments) >= MAX_ATTACHMENTS:
+            messagebox.showinfo("Attachments full",
+                "Clear an attachment before capturing the screen.",
+                parent=self.root)
+            return
+        if not messagebox.askyesno(
+                "Share a one-time screenshot",
+                "Capture your PRIMARY screen now?\n\n"
+                "Milo will temporarily hide, capture the display once, "
+                "then show the resulting image for review. It will be "
+                "queued as a LOCAL chat attachment, not uploaded.\n\n"
+                "Screenshots can contain private information. "
+                "The current text-only Colibri model cannot interpret pixels.",
+                parent=self.root):
+            self._audit("screen_capture", "denied")
+            return
+        self._audit("screen_capture", "approved")
+        self.root.withdraw()
+        self.root.after(320, self._capture_screen_after_hiding)
+
+    def _capture_screen_after_hiding(self):
+        image_path = None
+        failure = None
+        try:
+            image_path = capture_primary_screen(DATA_DIR / "captures")
+            self._queue_attachments([image_path])
+            self.session_captures.append(image_path)
+            self._audit("screen_capture", "completed")
+        except (ScreenCaptureError, OSError, ValueError) as exc:
+            if image_path is not None:
+                image_path.unlink(missing_ok=True)
+            self._audit("screen_capture", "failed")
+            failure = str(exc)[:260]
+        finally:
+            self.root.deiconify()
+            self.root.lift()
+        if failure:
+            messagebox.showerror("Screen capture", failure,
+                                 parent=self.root)
+        if image_path is not None and image_path.exists():
+            try:
+                open_preview(self.root, image_path)
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("Screenshot preview", str(exc)[:220],
+                                     parent=self.root)
+
+    def windows_tools_window(self):
+        panel = self._panel(
+            "Windows tools",
+            "Fixed, verified Windows Settings shortcuts. "
+            "Every open action asks permission. No arbitrary commands.")
+        tk.Label(
+            panel,
+            text="Choose a settings page to open. Milo will show the exact "
+                 "Windows URI before launching it, and won't change any settings.",
+            bg=PANEL, fg=MUTED, font=(FONT, 9), wraplength=490,
+            justify="left").pack(anchor="w", padx=24, pady=(10, 15))
+        for action in available_actions():
+            button = new_button(
+                panel, action.title,
+                lambda selected=action: self._perform_windows_action(selected))
+            button.configure(anchor="w", padx=16, pady=9)
+            button.pack(fill="x", padx=24, pady=4)
+        return panel
+
+    def drive_memory_window(self):
+        """Read-only Google OAuth, owner-selected folders, manual index refresh."""
+        panel = self._panel(
+            "Google Drive · Extended memory",
+            "Searchable reference memory for Milo. Google Drive is NEVER edited.")
+        explanation = (
+            "OAuth requests drive.readonly (account-wide VIEW access). "
+            "Milo indexes only your selected folder trees. The starting folder "
+            "is Pixelwolf — Sol Reference Library. Optional_Private, "
+            "Primary_Sources, Source Markdown and private subfolders are "
+            "excluded unless selected explicitly.\n"
+            "The snapshot and login token are encrypted for your Windows "
+            "account. No automatic synchronisation or writes; local Milo "
+            "conversations are never sent to Google. SOL notes remain "
+            "source material, NOT Milo's identity or instructions.")
+        tk.Label(panel, text=explanation, bg=PANEL, fg=MUTED,
+                 font=(FONT, 9), wraplength=650, justify="left").pack(
+                     fill="x", padx=22, pady=(14, 12))
+        status = tk.Label(panel, text="", bg=PANEL, fg=FG,
+                          font=(FONT, 10), justify="left",
+                          wraplength=650, anchor="w")
+        status.pack(fill="x", padx=22, pady=(0, 10))
+        tk.Label(panel, text="Folder access list", bg=PANEL, fg=VIOLET,
+                 font=(FONT, 10, "bold")).pack(anchor="w", padx=22)
+        listing = tk.Listbox(
+            panel, bg=BG, fg=FG, selectbackground=EDGE, font=(FONT, 9),
+            height=5, exportselection=False, activestyle="none")
+        listing.pack(fill="x", padx=22, pady=(5, 8))
+
+        def display():
+            if not panel.winfo_exists():
+                return
+            folders = drive_load_config(DATA_DIR)["folders"]
+            listing.delete(0, "end")
+            for id_ in folders:
+                label = SOL_NAME if id_ == SOL_FOLDER else "Owner-selected folder"
+                listing.insert("end", label + " · " + id_)
+            if not drive_connected(DATA_DIR):
+                status.configure(text="Not connected. Select your own Google "
+                                      "Desktop OAuth client JSON to authorise.")
+                return
+            try:
+                snapshot = drive_read_index(DATA_DIR)
+                stamp = snapshot.get("indexed_at") or "Never"
+                status.configure(
+                    text="Read-only connected · "+
+                    str(len(snapshot["documents"]))+" indexed documents · "
+                    "Last refresh "+stamp[:19].replace("T", " ")+
+                    " · skipped "+str(snapshot.get("skipped", 0)))
+            except DriveMemoryError as exc:
+                status.configure(text="Connected; local index unavailable: "+
+                                      str(exc)[:180])
+
+        def add():
+            if self.drive_task_active:
+                messagebox.showinfo(
+                    "Drive memory", "Finish the current login or refresh before "
+                    "changing which folders Milo may read.", parent=panel)
+                return
+            value = simpledialog.askstring(
+                "Add read-only Drive folder",
+                "Paste a Google Drive folder link or ID. Only select "
+                "folders you want Milo to reference.", parent=panel)
+            if not value:
+                return
+            try:
+                id_ = drive_root_id(value)
+                current = drive_load_config(DATA_DIR)["folders"]
+                if id_ not in current:
+                    drive_save_config(DATA_DIR, current+[id_])
+                    drive_cache_path(DATA_DIR).unlink(missing_ok=True)
+                    self._audit("drive_memory_scope", "completed")
+                display()
+            except (DriveMemoryError, OSError) as exc:
+                messagebox.showerror("Drive folder", str(exc)[:270],
+                                     parent=panel)
+
+        def remove():
+            if self.drive_task_active:
+                messagebox.showinfo(
+                    "Drive memory", "Finish the current login or refresh before "
+                    "changing folder access.", parent=panel)
+                return
+            choice = listing.curselection()
+            current = drive_load_config(DATA_DIR)["folders"]
+            if not choice or choice[0] >= len(current):
+                return
+            if len(current) == 1:
+                messagebox.showinfo(
+                    "Drive scope", "Keep one reference folder, or disconnect "
+                    "to erase the login and the entire local cache.",
+                    parent=panel)
+                return
+            if messagebox.askyesno(
+                    "Remove Drive folder",
+                    "Remove this reference folder and erase the previous "
+                    "snapshot? No Google document will be changed.",
+                    parent=panel):
+                try:
+                    drive_save_config(
+                        DATA_DIR, [x for i, x in enumerate(current)
+                                   if i != choice[0]])
+                    drive_cache_path(DATA_DIR).unlink(missing_ok=True)
+                    self._audit("drive_memory_scope", "revoked")
+                    display()
+                except (DriveMemoryError, OSError) as exc:
+                    messagebox.showerror("Drive scope", str(exc), parent=panel)
+
+        def launch_worker(action, callback):
+            if self.drive_task_active:
+                messagebox.showinfo("Drive memory", "Another Google Drive "
+                                    "operation is still running.", parent=panel)
+                return
+            self.drive_task_active = True
+            status.configure(text=action.title()+" · working locally "
+                                  "or waiting for Google…")
+            def job():
+                try:
+                    result = callback()
+                    self.events.put(("drive_memory_event", action, True, result))
+                except Exception as exc:
+                    # No OAuth tokens, document text or URL contents in errors.
+                    self.events.put((
+                        "drive_memory_event", action, False,
+                        "Google Drive operation failed: "+str(exc)[:250]))
+            threading.Thread(
+                target=job, name="milo-drive-"+action, daemon=True).start()
+
+        def connect():
+            if drive_connected(DATA_DIR):
+                messagebox.showinfo("Google Drive", "Already connected. "
+                                    "Click Refresh to update the reference "
+                                    "snapshot.", parent=panel)
+                return
+            if not messagebox.askyesno(
+                    "Google account READ-ONLY consent",
+                    "Google's drive.readonly OAuth scope permits viewing "
+                    "all files in the account you authorise. Milo's index "
+                    "is limited to the chosen folders and CANNOT write.\n\n"
+                    "You will need a Google Cloud Desktop OAuth client JSON "
+                    "for Milo, then approve the Google sign-in in your browser. "
+                    "The ChatGPT Google connector cannot supply Milo's token. "
+                    "Continue?", parent=panel):
+                return
+            path = filedialog.askopenfilename(
+                title="Choose Google Desktop OAuth client JSON",
+                filetypes=[("Desktop OAuth client", "*.json")],
+                parent=panel)
+            if path:
+                launch_worker("connect", lambda: (
+                    drive_connect(DATA_DIR, Path(path)),
+                    "Connected read-only. Click Refresh to index the chosen "
+                    "Google Drive folders.")[1])
+
+        def refresh():
+            if not drive_connected(DATA_DIR):
+                messagebox.showinfo(
+                    "Google Drive", "Connect a Google account first.",
+                    parent=panel)
+                return
+            def run():
+                outcome = drive_refresh(DATA_DIR)
+                return ("Updated "+str(outcome["count"])+" reference files; "+
+                        str(outcome["skipped"])+" unsupported/excluded. "
+                        "No Drive files were changed.")
+            self._audit("drive_memory_refresh", "approved")
+            launch_worker("refresh", run)
+
+        def disconnect():
+            if self.drive_task_active:
+                return
+            if messagebox.askyesno(
+                    "Disconnect and erase local Drive data",
+                    "Erase the Google token and the entire encrypted "
+                    "reference snapshot from this PC? Your Google files "
+                    "and Milo chat history will not change. Revoke Milo's "
+                    "app permission separately in Google Account security.",
+                    parent=panel):
+                try:
+                    drive_disconnect(DATA_DIR)
+                    self._audit("drive_memory_disconnect", "completed")
+                    display()
+                except (DriveMemoryError, OSError) as exc:
+                    messagebox.showerror("Disconnect", str(exc), parent=panel)
+
+        buttons = tk.Frame(panel, bg=PANEL)
+        buttons.pack(fill="x", padx=22, pady=(2, 12))
+        new_button(buttons, "Add folder", add).pack(side="left")
+        new_button(buttons, "Remove selected", remove).pack(
+            side="left", padx=(7, 0))
+        controls = tk.Frame(panel, bg=PANEL)
+        controls.pack(fill="x", padx=22, pady=(0, 15))
+        new_button(controls, "Connect Google", connect, primary=True).pack(
+            side="left")
+        new_button(controls, "Refresh memory", refresh).pack(
+            side="left", padx=(7, 0))
+        new_button(controls, "Disconnect / erase", disconnect).pack(
+            side="right")
+        self.drive_panel_refresh = display
+        display()
+        return panel
+
+    def pc_control_window(self):
+        """Owner-selected apps and deliberately scoped, one-time PC actions."""
+        panel = self._panel(
+            "PC control",
+            "Approved local actions. Every request shows a preview and asks "
+            "permission; no shell access or hidden computer control.")
+        examples = (
+            "Try asking Milo in chat:\n"
+            "  open notepad  ·  open downloads  ·  open https://example.org\n"
+            "  list files in documents  ·  list open windows\n"
+            "  switch to Notepad  ·  type \"Hello\" into Notepad\n"
+            "  rename \"old.txt\" to \"new.txt\" in downloads\n"
+            "  move files containing \"sprite\" from downloads to documents\n"
+            "  create note \"ideas.txt\" in documents with text \"First idea\"\n"
+            "Just say 'open Blender' or 'open OBS'. Milo looks for the .exe.\n"
+            "Apps in nonstandard folders can still be registered below.\n"
+            "File changes, application launches, window focus and typing always "
+            "require approval. No administrator or arbitrary script execution."
+        )
+        tk.Label(panel, text=examples, bg=PANEL, fg=MUTED,
+                 font=(FONT, 9), justify="left", anchor="w",
+                 wraplength=540).pack(fill="x", padx=22, pady=(15, 10))
+        tk.Label(panel, text="Your registered applications", bg=PANEL, fg=FG,
+                 font=(FONT, 10, "bold")).pack(anchor="w", padx=24, pady=(6, 4))
+        registry = tk.Listbox(
+            panel, height=7, bg=BG, fg=FG, selectbackground=EDGE,
+            activestyle="none", font=(FONT, 9))
+        registry.pack(fill="both", expand=True, padx=24, pady=(0, 8))
+        def refresh():
+            registry.delete(0, "end")
+            for app_name, target in sorted(load_apps(PC_APPS).items()):
+                registry.insert("end", app_name+"  ·  "+target)
+        def add():
+            selected = filedialog.askopenfilename(
+                title="Select an application you trust (Windows executable)",
+                filetypes=[("Applications", "*.exe")], parent=panel)
+            if not selected:
+                return
+            name = simpledialog.askstring(
+                "Application name", "Name to use in Milo chat "
+                "(for example: blender, obs, vroid):", parent=panel)
+            if not name:
+                return
+            try:
+                register_app(PC_APPS, Path(selected), name=name)
+            except (OSError, ValueError, PCActionError) as exc:
+                messagebox.showerror("PC app registration", str(exc)[:280],
+                                     parent=panel)
+                return
+            self._audit("pc_app_registration", "completed")
+            refresh()
+        def remove():
+            chosen = registry.curselection()
+            entries = sorted(load_apps(PC_APPS))
+            if not chosen or chosen[0] >= len(entries):
+                return
+            name = entries[chosen[0]]
+            if messagebox.askyesno(
+                    "Revoke registered application",
+                    "Remove '"+name+"' from Milo's launch list?\n\n"
+                    "The installed program will not be uninstalled.",
+                    parent=panel):
+                remove_app(PC_APPS, name)
+                self._audit("pc_app_registration", "revoked")
+                refresh()
+        controls = tk.Frame(panel, bg=PANEL)
+        controls.pack(fill="x", padx=24, pady=(0, 15))
+        new_button(controls, "Add local application", add,
+                   primary=True).pack(side="left")
+        new_button(controls, "Revoke selected", remove).pack(side="right")
+        refresh()
+        return panel
+
+    def _approve_pc_plan(self, plan: PCPlan) -> bool:
+        """Scrollable, complete per-action preview: no file list truncation."""
+        window = tk.Toplevel(self.root)
+        window.title("Milo · Approve "+plan.title)
+        window.configure(bg=PANEL)
+        window.geometry("690x485")
+        window.minsize(550, 360)
+        window.transient(self.root)
+        result = {"approved": False}
+        tk.Label(
+            window, text=plan.title+" — review before execution",
+            bg=PANEL, fg=FG, font=(FONT, 13, "bold")).pack(
+                fill="x", padx=20, pady=(16, 9))
+        details = tk.Frame(window, bg=PANEL)
+        details.pack(fill="both", expand=True, padx=18, pady=(0, 10))
+        scroll = tk.Scrollbar(details)
+        scroll.pack(side="right", fill="y")
+        view = tk.Text(
+            details, wrap="word", bg=BG, fg=FG, relief="flat",
+            font=(FONT, 10), padx=14, pady=12,
+            yscrollcommand=scroll.set)
+        view.pack(side="left", fill="both", expand=True)
+        scroll.configure(command=view.yview)
+        view.insert("1.0", plan.preview)
+        view.configure(state="disabled")
+        tk.Label(
+            window, text="One-time approval only. No future permissions "
+                         "are granted, and nothing runs on Cancel.",
+            bg=PANEL, fg=MUTED, font=(FONT, 9)).pack(
+                anchor="w", padx=20, pady=(0, 8))
+        actions = tk.Frame(window, bg=PANEL)
+        actions.pack(fill="x", padx=18, pady=(0, 14))
+        def finish(approved=False):
+            result["approved"] = bool(approved)
+            window.destroy()
+        new_button(actions, "Cancel", lambda: finish(False)).pack(side="left")
+        new_button(
+            actions, "Approve and execute", lambda: finish(True),
+            primary=True).pack(side="right")
+        window.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+        window.grab_set()
+        window.focus_set()
+        self.root.wait_window(window)
+        return result["approved"]
+
+    def _choose_installed_app(self, name: str, found: list[AppMatch]):
+        """Choose exact file when multiple apps match; never silently guess."""
+        if len(found) == 1:
+            return found[0]
+        window = tk.Toplevel(self.root)
+        window.title("Milo · Choose installed application")
+        window.geometry("780x415")
+        window.minsize(560, 330)
+        window.configure(bg=PANEL)
+        window.transient(self.root)
+        tk.Label(
+            window, text="Several installed applications match '"+name+"'.",
+            bg=PANEL, fg=FG, font=(FONT, 11, "bold")).pack(
+                fill="x", padx=20, pady=(16, 5))
+        tk.Label(
+            window, text="Select the EXE you want. Milo will show its full "
+                         "path again before asking permission to launch it.",
+            bg=PANEL, fg=MUTED, font=(FONT, 9), wraplength=720).pack(
+                fill="x", padx=20, pady=(0, 10))
+        holder = tk.Frame(window, bg=PANEL)
+        holder.pack(fill="both", expand=True, padx=18, pady=(0, 10))
+        scroll = tk.Scrollbar(holder)
+        scroll.pack(side="right", fill="y")
+        listing = tk.Listbox(
+            holder, bg=BG, fg=FG, selectbackground=EDGE,
+            font=(FONT, 9), activestyle="none", exportselection=False,
+            yscrollcommand=scroll.set)
+        listing.pack(fill="both", expand=True)
+        scroll.configure(command=listing.yview)
+        for match in found:
+            listing.insert(
+                "end", match.path.name+"  ·  "+str(match.path))
+        result = {"item": None}
+        def select(_event=None):
+            picked = listing.curselection()
+            if picked:
+                result["item"] = found[picked[0]]
+                window.destroy()
+        def cancel():
+            window.destroy()
+        control = tk.Frame(window, bg=PANEL)
+        control.pack(fill="x", padx=18, pady=(0, 15))
+        new_button(control, "Cancel", cancel).pack(side="left")
+        new_button(control, "Use selected executable", select,
+                   primary=True).pack(side="right")
+        listing.bind("<Double-Button-1>", select)
+        window.protocol("WM_DELETE_WINDOW", cancel)
+        window.grab_set()
+        listing.focus_set()
+        self.root.wait_window(window)
+        return result["item"]
+
+    def _discover_pc_app(self, plan: PCPlan, chat_context):
+        """Run Windows installed-app enumeration off the Tk interface thread."""
+        chat_id, prompt, target_id, author_name, avatar, shared = chat_context
+        self._begin_tool_turn(chat_id, prompt, target_id, author_name, avatar)
+        self._audit("pc_app_search", "started")
+        def worker():
+            try:
+                found = find_installed_apps(plan.args[0])
+                self.events.put(("pc_app_search_result", plan, chat_context, found, ""))
+            except (OSError, ValueError, PCActionError) as exc:
+                self.events.put((
+                    "pc_app_search_result", plan, chat_context, [],
+                    str(exc)[:240]))
+        threading.Thread(
+            target=worker, name="milo-app-discovery",
+            daemon=True).start()
+
+    def _complete_pc_app_search(self, plan: PCPlan, chat_context, found, error):
+        """Only this Tk-thread callback may show the chooser and approval UI."""
+        chat_id, prompt, target_id, author_name, avatar, shared = chat_context
+        if self.cancel.is_set():
+            self._audit("pc_app_search", "cancelled")
+            reply = "Application search cancelled."
+        elif error:
+            self._audit("pc_app_search", "failed")
+            reply = "I couldn't search installed applications: "+error
+        elif not found:
+            self._audit("pc_app_search", "completed")
+            reply = (
+                "I couldn't find an installed executable for '"+plan.args[0]+
+                "' in Windows App Paths, installed-app registrations or common "
+                "program folders. If it is installed in another drive or "
+                "Steam library, use Setup & modules → PC control → "
+                "Add local application as a fallback.")
+        else:
+            self._audit("pc_app_search", "completed")
+            match = self._choose_installed_app(plan.args[0], found)
+            if match is None:
+                self._audit("pc_launch_discovered_app", "denied")
+                reply = "I found matching installed programs, but no executable was selected."
+            else:
+                try:
+                    candidate = plan_discovered_launch(plan.args[0], match)
+                except (OSError, ValueError, PCActionError) as exc:
+                    self._audit("pc_launch_discovered_app", "failed")
+                    reply = "The discovered program changed: "+str(exc)[:230]
+                else:
+                    if not self._approve_pc_plan(candidate):
+                        self._audit("pc_launch_discovered_app", "denied")
+                        reply = "Application launch cancelled. Nothing was opened."
+                    else:
+                        self._audit("pc_launch_discovered_app", "approved")
+                        try:
+                            reply = execute_pc_plan(candidate, approved=True)
+                            self._audit("pc_launch_discovered_app", "completed")
+                        except (OSError, ValueError, PermissionError,
+                                PCActionError) as exc:
+                            self._audit("pc_launch_discovered_app", "failed")
+                            reply = "I couldn't launch that application: "+str(exc)[:240]
+        self.events.put((
+            "windows_action_result", chat_id, prompt, reply,
+            target_id, author_name, "", shared))
+
+    def _perform_pc_plan(self, plan: PCPlan, *, chat_context):
+        """Separate model-independent action preview and owner confirmation."""
+        if self.busy:
+            messagebox.showinfo(
+                "Milo is responding", "Finish the current response first.",
+                parent=self.root)
+            return
+        if plan.kind == "discover_app":
+            self._discover_pc_app(plan, chat_context)
+            return
+        try:
+            plan = prepare_pc_plan(plan)
+        except (OSError, ValueError, PCActionError, FileMoveError) as exc:
+            self._audit("pc_"+plan.kind, "failed")
+            messagebox.showerror(
+                "PC action preview", str(exc)[:320], parent=self.root)
+            return
+        if not self._approve_pc_plan(plan):
+            self._audit("pc_"+plan.kind, "denied")
+            return
+        self._audit("pc_"+plan.kind, "approved")
+        chat_id, prompt, target_id, author_name, author_avatar, shared = chat_context
+        self._begin_tool_turn(
+            chat_id, prompt, target_id, author_name, author_avatar)
+        try:
+            outcome = execute_pc_plan(
+                plan, approved=True, registered=load_apps(PC_APPS))
+            state = "completed"
+        except (OSError, ValueError, PermissionError, PCActionError,
+                FileMoveError) as exc:
+            outcome = "I couldn't complete that PC action: "+str(exc)[:260]
+            state = "failed"
+        self._audit("pc_"+plan.kind, state)
+        self.events.put((
+            "windows_action_result", chat_id, prompt, outcome,
+            target_id, author_name, "", shared))
+
+    def _perform_windows_action(self, action: WindowsAction, chat_context=None):
+        if self.busy:
+            messagebox.showinfo("Milo is responding",
+                                "Finish the current response first.",
+                                parent=self.root)
+            return
+        if not messagebox.askyesno(
+                "Approve Windows action",
+                "Open " + action.title + "?\n\n"
+                "Exact local Windows Settings URI:\n" + action.uri +
+                "\n\nMilo won't click, type or change any settings.",
+                parent=self.root):
+            self._audit("windows_settings", "denied")
+            return
+        self._audit("windows_settings", "approved")
+        try:
+            execute_action(action, approved=True)
+            reply = "Opened Windows " + action.title + ". No settings were changed."
+            outcome = "completed"
+        except (OSError, ValueError) as exc:
+            reply = "I couldn't open " + action.title + ": " + str(exc)[:220]
+            outcome = "failed"
+        self._audit("windows_settings", outcome)
+        if chat_context is None:
+            if outcome == "failed":
+                messagebox.showerror("Windows tools", reply, parent=self.root)
+            else:
+                messagebox.showinfo("Windows tools", reply, parent=self.root)
+            return
+        chat_id, prompt, target_id, author_name, author_avatar, shared = chat_context
+        self._begin_tool_turn(chat_id, prompt, target_id,
+                              author_name, author_avatar)
+        self.events.put((
+            "windows_action_result", chat_id, prompt, reply, target_id,
+            author_name, "", shared))
+
+    def activity_window(self):
+        window = self._panel("Tool activity",
+            "Local history of approvals, completions and failures. "
+            "Search terms, filenames, prompts and screenshots are not logged.")
+        listing = tk.Text(window, height=15, wrap="none",
+                          bg=BG, fg=FG, font=("Consolas", 9),
+                          relief="flat", padx=12, pady=9)
+        listing.pack(fill="both", expand=True, padx=20, pady=(8, 8))
+        def refresh():
+            entries = list_activity(self.db.db)
+            listing.configure(state="normal")
+            listing.delete("1.0", "end")
+            if not entries:
+                listing.insert("end", "No tool events recorded yet.")
+            else:
+                for timestamp, tool, outcome in entries:
+                    listing.insert(
+                        "end", timestamp[:19].replace("T", " ") + " UTC · " +
+                        tool.replace("_", " ") + " · " + outcome + "\n")
+            listing.configure(state="disabled")
+        controls = tk.Frame(window, bg=PANEL)
+        controls.pack(fill="x", padx=20, pady=(0, 12))
+        new_button(controls, "Refresh", refresh).pack(side="left")
+        def clear():
+            if messagebox.askyesno(
+                    "Delete activity history",
+                    "Delete the stored tool event history? "
+                    "This does not delete your chats or memories.",
+                    parent=window):
+                clear_activity(self.db.db)
+                refresh()
+        new_button(controls, "Clear activity history", clear).pack(side="right")
+        refresh()
+        return window
 
     def chat_view_selection(self):
         """One continuous selectable text area spanning all visible messages."""
@@ -1364,12 +2203,39 @@ class MiloDesktop:
         model_location = model_for_turn(
             settings, bot, self.config.get("model_location", ""))
 
+        # A small Windows action allowlist is handled without model inference.
+        # The user sees the exact operation and must approve execution.
+        requested_windows = (parse_action_request(clean_prompt)
+                             if target_id == "milo" and
+                             module_enabled(DATA_DIR, "files") else None)
+        if requested_windows is not None:
+            self._perform_windows_action(
+                requested_windows,
+                chat_context=(self.current_chat, prompt, target_id,
+                              author_name, author_avatar,
+                              settings.kind == "room"))
+            return
+
+        # Local user-message commands are interpreted by a typed broker,
+        # NEVER from LLM output, imported documents, webpage or email content.
+        requested_pc = (
+            parse_pc_request(clean_prompt, registered=load_apps(PC_APPS))
+            if target_id == "milo" and module_enabled(DATA_DIR, "files")
+            else None)
+        if requested_pc is not None:
+            self._perform_pc_plan(
+                requested_pc, chat_context=(
+                    self.current_chat, prompt, target_id,
+                    author_name, author_avatar, settings.kind == "room"))
+            return
+
         # A filename-specific "open" request uses deterministic local file
         # resolution. It NEVER invokes the model or executes the named file.
         requested_open = (parse_open_request(clean_prompt)
                           if target_id == "milo" and
                           module_enabled(DATA_DIR, "files") else None)
         if requested_open is not None:
+            self._tool_begin("local_preview")
             chat_id = self.current_chat
             self._begin_tool_turn(chat_id, prompt, target_id,
                                   author_name, author_avatar)
@@ -1400,6 +2266,7 @@ class MiloDesktop:
                            if target_id == "milo" and module_enabled(DATA_DIR, "files")
                            else None)
         if requested_files is not None:
+            self._tool_begin("local_file_search")
             chat_id = self.current_chat
             self.entry.delete("1.0", "end")
             self.entry_placeholder = False
@@ -1450,7 +2317,10 @@ class MiloDesktop:
                 "Milo will never include your uploaded files, private memory "
                 "or previous conversations in the web request. "
                 "Read-only HTTPS sources only. Continue?"):
+                self._audit("web_research", "denied")
                 return
+            self._audit("web_research", "approved")
+            self._tool_begin("web_research")
             chat_id = self.current_chat
             available_model = (
                 self.model_ready and bool(self.models) and
@@ -1586,12 +2456,15 @@ class MiloDesktop:
                 "\n\nUploaded documents, memory, private transcripts and "
                 "specialist instructions are NOT uploaded. "
                 "Continue with this one search?"):
+                self._audit("web_research", "denied")
                 return
+            self._audit("web_research", "approved")
 
         # User-selected attachments enter the private application folder only
         # when a real chat turn is submitted. Attachments are not uploaded.
         staged = []
         local_context = ""
+        vision_job = None
         if self.queued_attachments:
             try:
                 staged = stage_attachments(
@@ -1600,14 +2473,55 @@ class MiloDesktop:
             except (AttachmentError, OSError, ValueError) as exc:
                 messagebox.showerror("Attachment", str(exc)[:300])
                 return
-            if has_images and not messagebox.askokcancel(
-                "Image understanding not installed",
-                "The local model currently running is a text-only checkpoint. "
-                "Milo can preview your image, but cannot analyse its pixels yet. "
-                "Continue with text-only document context?"):
-                for item in staged:
-                    item.path.unlink(missing_ok=True)
-                return
+            if has_images:
+                image_items = [item for item in staged if item.kind == "image"]
+                vision_allowed = (
+                    module_enabled(DATA_DIR, "vision")
+                    and self.config.get("vision_enabled", "off") == "on")
+                if vision_allowed and len(image_items) <= 3:
+                    try:
+                        backend = OllamaLocalVision(
+                            model=self.config.get("vision_model", ""),
+                            endpoint=self.config.get("vision_endpoint", ""))
+                    except ValueError as exc:
+                        messagebox.showerror("Local vision settings",
+                                             str(exc), parent=self.root)
+                        for item in staged:
+                            item.path.unlink(missing_ok=True)
+                        return
+                    approved = messagebox.askyesno(
+                        "Run local image analysis",
+                        "Send " + str(len(image_items)) +
+                        " selected image(s) and only this message to the "
+                        "configured LOCAL Ollama service?\n\n" +
+                        backend.endpoint + "\nModel: " + backend.model +
+                        "\n\nNothing is sent to a cloud provider. "
+                        "The resulting description will be passed to Milo's "
+                        "normal chat model as attributed evidence. "
+                        "No desktop actions will be taken.",
+                        parent=self.root)
+                    self._audit("vision_inference",
+                                "approved" if approved else "denied")
+                    if approved:
+                        vision_job = (backend, image_items)
+                        self._tool_begin("vision_inference")
+                    else:
+                        for item in staged:
+                            item.path.unlink(missing_ok=True)
+                        return
+                else:
+                    explanation = (
+                        "Only three images can be analysed in one request."
+                        if vision_allowed else
+                        "Local vision is disabled or not enabled in Settings. "
+                        "The current Colibri text model cannot see pixels.")
+                    if not messagebox.askokcancel(
+                        "Images are not analysed",
+                        explanation + "\n\nContinue WITHOUT image understanding?",
+                        parent=self.root):
+                        for item in staged:
+                            item.path.unlink(missing_ok=True)
+                        return
         attachment_names = (", ".join(f.name for f in staged) if staged else "")
         stored_prompt = (prompt + ("\n[Attached: " + attachment_names + "]"
                                    if attachment_names else ""))
@@ -1629,11 +2543,67 @@ class MiloDesktop:
             try:
                 research_context = ""
                 answer_suffix = ""
+                actual_context = local_context
+                if vision_job is not None:
+                    self.events.put(("research_status",
+                                     "Running approved LOCAL image analysis…"))
+                    backend, image_items = vision_job
+                    try:
+                        findings = backend.analyse(
+                            [item.path for item in image_items],
+                            clean_prompt, approved=True)
+                        if self.cancel.is_set():
+                            self.events.put(("cancelled", chat_id))
+                            return
+                        # Use original owner-visible filenames, never the
+                        # random private attachment storage paths.
+                        findings = [
+                            type(finding)(item.name, finding.model,
+                                          finding.observation)
+                            for item, finding in zip(image_items, findings)
+                        ]
+                        actual_context += "\n\n" + vision_context(findings)
+                        self.events.put(("research_status",
+                            "Local vision completed · composing Milo's answer…"))
+                    except (VisionError, OSError, ValueError) as exc:
+                        raise VisionError(
+                            "Image analysis failed; no visual result was "
+                            "supplied to the chat model. " + str(exc)[:180]
+                        ) from exc
                 if research_query:
                     self.events.put(("research_status", "Searching the public web…"))
                     sources = search_public_web(research_query)
                     research_context = source_context(sources)
                     answer_suffix = source_footer(sources)
+                # This searches a user-refreshed, encrypted local index:
+                # no Google API traffic is initiated by an ordinary chat.
+                if target_id == "milo" and module_enabled(DATA_DIR, "drive_memory"):
+                    drive_intent = any(
+                        term in clean_prompt.casefold() for term in
+                        ("google drive", "drive docs", "drive memory",
+                         "our project files", "sol archive", "reference library"))
+                    if drive_connected(DATA_DIR):
+                        try:
+                            matches = drive_search_memory(DATA_DIR, clean_prompt)
+                            source_text, source_links = drive_model_context(matches)
+                            if source_text:
+                                actual_context += "\n\n" + source_text
+                                answer_suffix += source_links
+                            elif drive_intent:
+                                actual_context += (
+                                    "\n\nNo verified source matches in the "
+                                    "last local Google Drive reference snapshot. "
+                                    "Do not invent the missing information.")
+                        except DriveMemoryError:
+                            actual_context += (
+                                "\n\nDrive memory index could not be read; "
+                                "ask the owner to refresh it. Do not claim "
+                                "that its contents were verified.")
+                    elif drive_intent:
+                        actual_context += (
+                            "\n\nGoogle Drive is NOT connected on this PC. "
+                            "Ask the owner to open Setup & modules > "
+                            "Google Drive memory.")
                 with LocalMemoryStore(DB_PATH) as store:
                     provider = LocalOpenAIProvider(
                         model=model, base_url=self.active_base_url)
@@ -1648,7 +2618,7 @@ class MiloDesktop:
                         shared_room=(settings.kind == "room"),
                         research_context=research_context,
                         answer_suffix=answer_suffix,
-                        local_attachment_context=local_context)
+                        local_attachment_context=actual_context)
                     chunks = conversation.stream_reply(
                         clean_prompt, chat_id=chat_id,
                         stored_user_text=stored_prompt)
@@ -1739,7 +2709,27 @@ class MiloDesktop:
             while True:
                 event = self.events.get_nowait()
                 kind = event[0]
-                if kind == "managed_ready":
+                if kind == "tray_open":
+                    self._restore_from_tray()
+                elif kind == "tray_exit":
+                    self._close()
+                    return
+                elif kind == "tray_unavailable":
+                    # A crashed notification-area host must not strand a
+                    # hidden application with no way to reopen it.
+                    self._restore_from_tray()
+                    messagebox.showwarning(
+                        "Milo tray unavailable",
+                        "Milo could not keep its Windows tray icon active. "
+                        "The main window has been restored.",
+                        parent=self.root)
+                elif kind == "quick_chat":
+                    self.show_quick_chat()
+                elif kind == "hotkey_unavailable":
+                    # The OS shortcut is already reserved by another app.
+                    # The visible Quick chat button remains available.
+                    pass
+                elif kind == "managed_ready":
                     self.engine_starting = False
                     self.loading_model_location = ""
                     self.active_base_url = event[1]
@@ -1783,11 +2773,19 @@ class MiloDesktop:
                 elif kind == "update_check":
                     self.release_candidate = event[1]
                     version = release_version(event[1]) if event[1] else ""
+                    if event[1] and newer(version):
+                        update_text = "Update available: " + version
+                    elif event[1] and newer(VERSION, version):
+                        update_text = (
+                            "This Milo " + VERSION + " build is a preview. "
+                            "Latest published release: " + version +
+                            ". Preview builds are distributed separately.")
+                    elif event[1]:
+                        update_text = "You're on the latest published Milo version."
+                    else:
+                        update_text = "No public Milo release published yet."
                     self.update_label.configure(
-                        text=("Update available: " + version
-                              if event[1] and newer(version)
-                              else "You're running the latest published Milo version."
-                              if event[1] else "No public Milo release published yet."),
+                        text=update_text,
                         fg=ORANGE if event[1] and newer(version) else MUTED)
                     self.update_button.configure(
                         state="normal" if event[1] and newer(version)
@@ -1800,12 +2798,17 @@ class MiloDesktop:
                         "Verified update ready",
                         "Milo " + event[2] +
                         " has downloaded and passed SHA-256 verification.\n\n"
-                        "Close Milo and open the installer now? "
-                        "Your existing Models and private memories stay in place."):
+                        "Install Milo " + event[2] + " and reopen it automatically "
+                        "when installation finishes? Milo will shut down cleanly "
+                        "before the installer replaces its files. Your existing "
+                        "Models and private memories stay in place."):
                         try:
                             import subprocess
+                            # Installer waits for this PID to fully exit,
+                            # preventing a race with the running exe/Colibri DLLs.
+                            # It then restarts Milo itself after installation.
                             subprocess.Popen(
-                                [str(destination)],
+                                [str(destination), "/WAITFORPID=" + str(os.getpid())],
                                 stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL,
@@ -1831,9 +2834,17 @@ class MiloDesktop:
                         "Enable it in the list and restart Milo to load it.")
                 elif kind == "updater_error":
                     self.update_label.configure(
-                        text="Update failed; existing installation unchanged.",
+                        text="Update check failed: " + event[1][:270] +
+                             "\nExisting installation unchanged. "
+                             "You can open the official releases page in a browser.",
                         fg=ORANGE)
-                    messagebox.showerror("Updater", event[1])
+                    messagebox.showerror(
+                        "Updater connection",
+                        event[1] + "\n\n"
+                        "If GitHub is blocked on this PC, use the manual "
+                        "installer from a trusted source and check its hash. "
+                        "Milo has not installed or changed anything.",
+                        parent=self.root)
                 elif kind == "gguf_model_ready":
                     if len(event) > 3 and event[3] == "research":
                         original = get_bot(self.db.db, "research")
@@ -1883,6 +2894,37 @@ class MiloDesktop:
                     self.check_connection()
                 elif kind == "model_import_error":
                     messagebox.showerror("Model import", event[1])
+                elif kind == "drive_memory_event":
+                    self.drive_task_active = False
+                    action, succeeded, message = event[1:4]
+                    self._audit("drive_memory_"+action,
+                                "completed" if succeeded else "failed")
+                    if callable(self.drive_panel_refresh):
+                        try:
+                            self.drive_panel_refresh()
+                        except tk.TclError:
+                            pass
+                    if succeeded:
+                        messagebox.showinfo(
+                            "Google Drive memory", message, parent=self.root)
+                    else:
+                        messagebox.showerror(
+                            "Google Drive memory", message, parent=self.root)
+                elif kind == "pc_app_search_result":
+                    self._complete_pc_app_search(
+                        event[1], event[2], event[3], event[4])
+                elif kind == "windows_action_result":
+                    chat_id, prompt, reply = event[1:4]
+                    self._save_direct_turn(
+                        chat_id, prompt, reply, event[4], event[5],
+                        event[6], event[7])
+                    if chat_id == self.current_chat and self.pending_message is not None:
+                        self.chat_view.append_to(self.pending_message, reply)
+                        self.chat_view.finish(self.pending_message)
+                        self.pending_message = None
+                    self._set_busy(False)
+                    self._refresh_chat_list()
+                    self._restore_service_status()
                 elif kind == "file_preview_ready":
                     chat_id, prompt, chosen_path = event[1:4]
                     try:
@@ -1907,6 +2949,9 @@ class MiloDesktop:
                             )
                     except Exception as exc:
                         reply = "I couldn't preview that file: " + str(exc)[:280]
+                        self._tool_finish("failed")
+                    else:
+                        self._tool_finish("completed")
                     self._save_direct_turn(
                         chat_id, prompt, reply, event[4], event[5],
                         event[6], event[7])
@@ -1918,6 +2963,7 @@ class MiloDesktop:
                     self._refresh_chat_list()
                     self._restore_service_status()
                 elif kind == "tool_error":
+                    self._tool_finish("failed")
                     chat_id, prompt, reply = event[1:4]
                     self._save_direct_turn(
                         chat_id, prompt, reply, event[4], event[5],
@@ -1930,6 +2976,7 @@ class MiloDesktop:
                     self._refresh_chat_list()
                     self._restore_service_status()
                 elif kind == "local_tool_done":
+                    self._tool_finish("completed")
                     if event[1] == self.current_chat and self.pending_message is not None:
                         self.chat_view.append_to(self.pending_message, event[2])
                         self.chat_view.finish(self.pending_message)
@@ -1942,6 +2989,7 @@ class MiloDesktop:
                     if event[1] == self.current_chat and self.pending_message is not None:
                         self.chat_view.append_to(self.pending_message, event[2])
                 elif kind == "done":
+                    self._tool_finish("completed")
                     if event[1] == self.current_chat and self.pending_message is not None:
                         self.chat_view.finish(self.pending_message)
                         self.pending_message = None
@@ -1950,6 +2998,7 @@ class MiloDesktop:
                     self._refresh_chat_context()
                     self._restore_service_status()
                 elif kind == "cancelled":
+                    self._tool_finish("cancelled")
                     if self.pending_message is not None:
                         self.chat_view.finish(
                             self.pending_message, status="Response cancelled · not saved")
@@ -1957,6 +3006,7 @@ class MiloDesktop:
                     self._set_busy(False)
                     self._restore_service_status()
                 elif kind == "error":
+                    self._tool_finish("failed")
                     if self.pending_message is not None:
                         self.chat_view.finish(
                             self.pending_message, status="Response incomplete · not saved")
@@ -1985,6 +3035,16 @@ class MiloDesktop:
                     messagebox.showinfo("Milo backup", event[1])
                 elif kind == "backup_error":
                     messagebox.showerror("Milo backup", event[1])
+                elif kind == "file_organize_done":
+                    self._audit("file_organize", "completed")
+                    messagebox.showinfo(
+                        "File organiser",
+                        f"Moved {event[1]} approved file(s) successfully. "
+                        "No existing files were overwritten.", parent=self.root)
+                elif kind == "file_organize_error":
+                    self._audit("file_organize", "failed")
+                    messagebox.showerror(
+                        "File organiser", event[1], parent=self.root)
                 elif kind == "file_search":
                     self._show_search_results(event[1], event[2])
                 elif kind == "file_search_error":
@@ -2087,6 +3147,18 @@ class MiloDesktop:
             buttons, "Download verified installer", get_update)
         self.update_button.configure(state="disabled")
         self.update_button.pack(side="left")
+        def open_official_releases():
+            # User-triggered browser navigation; never opens remote installers
+            # in the background and never bypasses checksum verification.
+            if not webbrowser.open(
+                    "https://github.com/BoomForge/colibri/releases"):
+                messagebox.showinfo(
+                    "GitHub releases",
+                    "Open https://github.com/BoomForge/colibri/releases "
+                    "in your browser.", parent=panel)
+        new_button(
+            buttons, "Open GitHub Releases", open_official_releases).pack(
+                side="left", padx=(9, 0))
 
         tk.Frame(panel, height=1, bg=EDGE).pack(fill="x", padx=24, pady=(4, 12))
         tk.Label(panel, text="Built-in features", bg=PANEL, fg=VIOLET,
@@ -2662,7 +3734,9 @@ class MiloDesktop:
             messagebox.showerror("Milo import failed", str(exc)[:350])
 
     def settings_window(self):
-        panel = self._panel("Settings", "Manage your local model and identity.")
+        panel = self._panel("Settings", "Manage models, identity and optional tools.")
+        panel.geometry("620x780")
+        panel.minsize(560, 650)
         values = {}
         fields = [
             ("Name", "user_name"),
@@ -2684,6 +3758,45 @@ class MiloDesktop:
             tk.Label(panel, text="Detected models: " + ", ".join(self.models[:4]),
                      bg=PANEL, fg=MUTED, wraplength=475).pack(
                          padx=24, pady=7, anchor="w")
+        tk.Label(
+            panel, text="Optional LOCAL vision — disabled by default",
+            bg=PANEL, fg=VIOLET, font=(FONT, 10, "bold")).pack(
+                anchor="w", padx=24, pady=(10, 4))
+        vision_enabled = tk.BooleanVar(
+            value=self.config.get("vision_enabled", "off") == "on")
+        tk.Checkbutton(
+            panel, text="Allow image analysis (ask approval each time)",
+            variable=vision_enabled, bg=PANEL, fg=FG, selectcolor=BG,
+            activebackground=PANEL, activeforeground=FG,
+            font=(FONT, 9)).pack(anchor="w", padx=24)
+        for title, key in (
+            ("Installed Ollama vision model", "vision_model"),
+            ("Local Ollama URL", "vision_endpoint"),
+        ):
+            tk.Label(panel, text=title, bg=PANEL, fg=MUTED,
+                     font=(FONT, 9)).pack(anchor="w", padx=24, pady=(5, 2))
+            var = tk.StringVar(value=self.config.get(key, ""))
+            values[key] = var
+            tk.Entry(panel, textvariable=var, bg=BG, fg=FG,
+                     insertbackground=FG, relief="flat",
+                     font=(FONT, 9), highlightthickness=1,
+                     highlightbackground=EDGE, highlightcolor=VIOLET).pack(
+                         fill="x", padx=24, ipady=5)
+        tk.Label(
+            panel,
+            text="Uses a separate local vision model. Never downloads models "
+                 "or sends images to a cloud service. A 2B vision model "
+                 "is recommended for lower-memory computers.",
+            bg=PANEL, fg=MUTED, font=(FONT, 8),
+            wraplength=535, justify="left").pack(
+                anchor="w", padx=24, pady=(4, 7))
+        shortcut_enabled = tk.BooleanVar(
+            value=self.config.get("global_shortcut", "on") == "on")
+        tk.Checkbutton(
+            panel, text="Enable global Ctrl+Shift+M quick-chat shortcut",
+            variable=shortcut_enabled, bg=PANEL, fg=FG, selectcolor=BG,
+            activebackground=PANEL, activeforeground=FG,
+            font=(FONT, 9)).pack(anchor="w", padx=24, pady=(12, 5))
         avatars = tk.Frame(panel, bg=PANEL)
         avatars.pack(fill="x", padx=24, pady=15)
         new_button(avatars, "Change your avatar (PNG/GIF)",
@@ -2700,13 +3813,32 @@ class MiloDesktop:
             except (ValueError, TypeError) as exc:
                 messagebox.showerror("Invalid local endpoint", str(exc), parent=panel)
                 return
+            next_config["vision_enabled"] = (
+                "on" if vision_enabled.get() else "off")
+            if next_config["vision_enabled"] == "on":
+                try:
+                    OllamaLocalVision(
+                        model=next_config["vision_model"],
+                        endpoint=next_config["vision_endpoint"])
+                except ValueError as exc:
+                    messagebox.showerror("Invalid local vision settings",
+                                         str(exc), parent=panel)
+                    return
             if not next_config["user_name"] or not next_config["milo_name"]:
                 messagebox.showerror("Invalid names", "Enter both display names.",
                                      parent=panel)
                 return
             next_config["model_directory"] = str(self.models_root)
+            previous_shortcut = self.config.get("global_shortcut", "on")
+            next_config["global_shortcut"] = (
+                "on" if shortcut_enabled.get() else "off")
             self.config = next_config
             save_config(self.config)
+            if previous_shortcut != next_config["global_shortcut"]:
+                self.quick_hotkey.stop()
+                self.quick_hotkey = GlobalQuickChatHotkey(self.events)
+                if next_config["global_shortcut"] == "on":
+                    self.quick_hotkey.start()
             self._refresh_profile()
             self._load_chat()
             panel.destroy()
@@ -2731,55 +3863,236 @@ class MiloDesktop:
             messagebox.showerror("Avatar", str(exc))
 
     def memory_window(self):
-        panel = self._panel("Approved memory", "Milo remembers chat history; permanent notes need your approval.")
+        panel = self._panel(
+            "Approved memory",
+            "Review and correct source-labelled permanent memories. "
+            "Nothing is changed without your approval.")
         listbox = tk.Listbox(panel, height=10, bg=BG, fg=FG,
                              selectbackground=EDGE, font=(FONT, 10), relief="flat")
-        listbox.pack(fill="both", expand=True, padx=24, pady=12)
+        listbox.pack(fill="both", expand=True, padx=24, pady=(12, 6))
         note_ids = []
+        provenance = tk.Label(panel, text="Select a note to inspect its source.",
+                              bg=PANEL, fg=MUTED, justify="left", anchor="w",
+                              wraplength=515, font=(FONT, 9))
+        provenance.pack(fill="x", padx=24, pady=(3, 8))
+        editor = tk.Text(panel, height=5, wrap="word")
+        style_text(editor, small=True)
+        editor.pack(fill="x", padx=24, pady=6)
+
         def refresh():
             listbox.delete(0, "end")
             note_ids.clear()
             rows = self.db.db.execute(
                 "SELECT id,text FROM approved_notes ORDER BY id DESC LIMIT 200"
             ).fetchall()
-            for note_id, text in rows:
+            for note_id, note_text in rows:
                 note_ids.append(note_id)
-                listbox.insert("end", text[:110].replace("\n", " "))
-        refresh()
-        editor = tk.Text(panel, height=4, wrap="word")
-        style_text(editor, small=True)
-        editor.pack(fill="x", padx=24, pady=6)
+                listbox.insert("end", note_text[:110].replace("\n", " "))
+            provenance.configure(
+                text="Select a note to see its source and correction history.")
+
+        def selected_id():
+            selection = listbox.curselection()
+            return note_ids[selection[0]] if selection else None
+
+        def inspect(_event=None):
+            note_id = selected_id()
+            if note_id is None:
+                return
+            note = self.db.note_provenance(note_id)
+            if not note:
+                refresh()
+                return
+            editor.delete("1.0", "end")
+            editor.insert("1.0", note["text"])
+            provenance.configure(
+                text="Source: " + note["original_source_kind"] + " · " +
+                note["original_source_ref"] + "\nCreated: " +
+                note["created_at"][:19] +
+                (" · Owner corrections: " + str(note["revision_count"])
+                 if note["revision_count"] else ""))
+
+        listbox.bind("<<ListboxSelect>>", inspect)
+
         def add():
             note = editor.get("1.0", "end-1c").strip()
             if not note:
                 return
-            if not messagebox.askyesno("Approve long-term memory",
-                 "Save this information as an approved persistent memory note?",
-                 parent=panel):
+            if not messagebox.askyesno(
+                    "Approve a NEW long-term memory",
+                    "Save this text as a separate, owner-approved memory note? "
+                    "Use Correct selected to replace an existing note.",
+                    parent=panel):
                 return
             try:
                 self.db.add_approved_note(
                     note, source_kind="owner_approved",
                     source_ref="desktop:" + datetime.now().isoformat(),
-                    approved=True,
-                )
+                    approved=True)
                 editor.delete("1.0", "end")
                 refresh()
             except ValueError as exc:
                 messagebox.showerror("Memory", str(exc), parent=panel)
-        def remove():
-            idx = listbox.curselection()
-            if not idx:
+
+        def correct():
+            note_id = selected_id()
+            if note_id is None:
+                messagebox.showinfo("Correct memory",
+                                    "Select an existing memory first.",
+                                    parent=panel)
                 return
-            if messagebox.askyesno("Delete note", "Permanently delete this memory note?",
-                                   parent=panel):
-                self.db.delete_note(note_ids[idx[0]])
+            note = editor.get("1.0", "end-1c").strip()
+            if not note:
+                return
+            if not messagebox.askyesno(
+                    "Approve memory correction",
+                    "Replace the selected memory with the edited text?\n\n"
+                    "Milo will retain its original source and a local revision "
+                    "record. No other notes or chats are changed.",
+                    parent=panel):
+                return
+            try:
+                changed = self.db.revise_note(note_id, note, approved=True)
+                if changed:
+                    refresh()
+                else:
+                    messagebox.showinfo("Memory",
+                                        "The selected memory is unchanged.",
+                                        parent=panel)
+            except (ValueError, sqlite3.Error) as exc:
+                messagebox.showerror("Memory", str(exc)[:250], parent=panel)
+
+        def remove():
+            note_id = selected_id()
+            if note_id is None:
+                return
+            if messagebox.askyesno(
+                    "Delete note",
+                    "Permanently delete this memory and its correction history?",
+                    parent=panel):
+                self.db.delete_note(note_id)
+                editor.delete("1.0", "end")
                 refresh()
+
         buttons = tk.Frame(panel, bg=PANEL)
         buttons.pack(fill="x", padx=24, pady=16)
-        new_button(buttons, "Save approved note", add, primary=True).pack(
-            side="left", padx=(0, 8))
+        new_button(buttons, "Save new memory", add, primary=True).pack(
+            side="left", padx=(0, 6))
+        new_button(buttons, "Correct selected", correct).pack(
+            side="left", padx=(0, 6))
         new_button(buttons, "Delete selected", remove).pack(side="left")
+        refresh()
+
+    def organise_files_window(self):
+        """Explicit owner folders and reviewed list; no LLM-driven file moves."""
+        panel = self._panel(
+            "Organise files",
+            "Preview-only until you approve the complete file list. "
+            "No overwrites or executable files; same drive only.")
+        panel.geometry("690x680")
+        source_var = tk.StringVar()
+        target_var = tk.StringVar()
+        match_var = tk.StringVar()
+        for caption, variable in (
+            ("Source folder", source_var),
+            ("Destination folder", target_var),
+        ):
+            tk.Label(panel, text=caption, bg=PANEL, fg=MUTED).pack(
+                anchor="w", padx=24, pady=(10, 3))
+            row = tk.Frame(panel, bg=PANEL)
+            row.pack(fill="x", padx=24)
+            tk.Entry(row, textvariable=variable, bg=BG, fg=FG,
+                     font=(FONT, 9), relief="flat").pack(
+                         side="left", fill="x", expand=True, ipady=7)
+            new_button(row, "Browse…", lambda v=variable: v.set(
+                filedialog.askdirectory(parent=panel) or v.get())).pack(
+                    side="left", padx=(8, 0))
+        tk.Label(panel, text="Filename contains (literal text, e.g. stone)",
+                 bg=PANEL, fg=MUTED).pack(
+                     anchor="w", padx=24, pady=(14, 3))
+        tk.Entry(panel, textvariable=match_var, bg=BG, fg=FG,
+                 font=(FONT, 9), relief="flat").pack(
+                     fill="x", padx=24, ipady=8)
+        listing = tk.Listbox(panel, height=10, bg=BG, fg=FG,
+                             selectbackground=EDGE, relief="flat",
+                             font=("Consolas", 9))
+        listing.pack(fill="both", expand=True, padx=24, pady=(12, 4))
+        status = tk.Label(panel, text="No files selected or moved.",
+                          bg=PANEL, fg=MUTED, wraplength=610,
+                          justify="left")
+        status.pack(anchor="w", padx=24, pady=(5, 10))
+        approved_plan = [None]
+        controls = tk.Frame(panel, bg=PANEL)
+        controls.pack(fill="x", padx=24, pady=(4, 16))
+        move_button = new_button(controls, "Move reviewed files", lambda: None,
+                                 primary=True)
+        move_button.configure(state="disabled")
+        move_button.pack(side="right", padx=(6, 0))
+
+        def invalidate(*_):
+            approved_plan[0] = None
+            move_button.configure(state="disabled")
+            listing.delete(0, "end")
+            status.configure(text="Folders or filter changed · preview again.")
+        for variable in (source_var, target_var, match_var):
+            variable.trace_add("write", invalidate)
+
+        def preview():
+            listing.delete(0, "end")
+            move_button.configure(state="disabled")
+            approved_plan[0] = None
+            try:
+                plan = plan_file_moves(
+                    source_var.get(), target_var.get(), match_var.get())
+            except (FileMoveError, OSError, ValueError) as exc:
+                status.configure(text="Preview failed: " + str(exc)[:250],
+                                 fg=ORANGE)
+                return
+            if not plan.files:
+                status.configure(text="No supported matching files found.",
+                                 fg=MUTED)
+                return
+            for item in plan.files:
+                listing.insert(
+                    "end", item.source.name + "  (" +
+                    format(item.size, ",") + " bytes)")
+            approved_plan[0] = plan
+            status.configure(
+                text=f"Preview: {len(plan.files)} file(s). Originals remain "
+                     "untouched until you approve the move.", fg=FG)
+            move_button.configure(state="normal")
+
+        def move():
+            plan = approved_plan[0]
+            if plan is None:
+                return
+            if not messagebox.askyesno(
+                    "Approve file move",
+                    "Move ALL " + str(len(plan.files)) + " reviewed files?\n\n"
+                    + "FROM: " + str(plan.source_root)
+                    + "\nTO: " + str(plan.destination_root)
+                    + "\n\nNo files will be overwritten. This changes your "
+                    "original project folders; make a backup if needed.",
+                    parent=panel):
+                self._audit("file_organize", "denied")
+                return
+            self._audit("file_organize", "approved")
+            self._audit("file_organize", "started")
+            approved_plan[0] = None
+            move_button.configure(state="disabled")
+            status.configure(text="Moving reviewed files…", fg=ORANGE)
+            def worker():
+                try:
+                    moved = execute_file_moves(plan, approved=True)
+                    self.events.put(("file_organize_done", moved))
+                except (FileMoveError, PermissionError, OSError) as exc:
+                    self.events.put(("file_organize_error", str(exc)[:350]))
+            threading.Thread(
+                target=worker, name="milo-owner-file-move", daemon=True).start()
+
+        move_button.configure(command=move)
+        new_button(controls, "Preview matching files", preview).pack(side="left")
+        return panel
 
     def find_files_window(self):
         panel = self._panel("Find files", "Deterministic search. No model or network used.")
@@ -2971,7 +4284,76 @@ class MiloDesktop:
                  justify="left").pack(anchor="w", padx=24, pady=(0, 8))
         return window
 
+    def _on_main_unmap(self, event):
+        """Windows minimise button behaves like Close: hide to the tray."""
+        if event.widget is not self.root or self._exiting:
+            return
+        try:
+            if self.root.state() == "iconic":
+                self.root.after_idle(self._hide_to_tray)
+        except tk.TclError:
+            pass
+
+    def _hide_to_tray(self):
+        """Retain the process and local Colibri model when X/minimise is used."""
+        if self._exiting:
+            return
+        if not self.tray.ready:
+            # Never withdraw a window without a working restoration icon.
+            try:
+                self.root.deiconify()
+            except tk.TclError:
+                return
+            messagebox.showwarning(
+                "Milo tray unavailable",
+                "Milo will stay open because its Windows tray icon is not "
+                "ready. Check that your notification area is available.",
+                parent=self.root)
+            return
+        self._tray_hidden_panels = []
+        for widget in self.root.winfo_children():
+            if not isinstance(widget, tk.Toplevel):
+                continue
+            try:
+                if widget.winfo_viewable():
+                    self._tray_hidden_panels.append(widget)
+                    widget.withdraw()
+            except tk.TclError:
+                continue
+        self.root.withdraw()
+
+    def _restore_from_tray(self):
+        """Bring back Milo from a tray double-click or Open Milo action."""
+        if self._exiting:
+            return
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            for widget in self._tray_hidden_panels:
+                try:
+                    if widget.winfo_exists():
+                        widget.deiconify()
+                except tk.TclError:
+                    continue
+            self._tray_hidden_panels = []
+            self.root.lift()
+            self.root.focus_set()
+        except tk.TclError:
+            pass
+
     def _close(self):
+        """Explicit shutdown from tray or approved installer handoff."""
+        if self._exiting:
+            return
+        self._exiting = True
+        self.tray.stop()
+        self.quick_hotkey.stop()
+        for path in self.session_captures:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.session_captures.clear()
         self.cancel.set()
         self.model_download_cancel.set()
         self.engine.stop()
@@ -3015,6 +4397,98 @@ def ui_self_test() -> int:
             assert app.advanced_open
             app.toggle_advanced()
             mark("after sidebar")
+            # Real PC-control entrypoint must survive PyInstaller packaging and
+            # expose the exact locally permitted operations without starting
+            # them or needing an LLM.
+            preview_plan = parse_pc_request("open downloads")
+            assert preview_plan and preview_plan.kind == "open_folder"
+            assert parse_pc_request("run powershell") is None
+            control_window = app.pc_control_window()
+            assert control_window.winfo_exists(), (
+                "PC control and app registry panel did not open")
+            control_window.destroy()
+            mark("after PC broker panel and deterministic command route")
+            # Drive memory setup is offline until the owner explicitly
+            # authorises an OAuth Desktop app in their own browser.
+            from colibri.milo_core.drive_memory import SCOPES
+            assert SCOPES == ("https://www.googleapis.com/auth/drive.readonly",)
+            read_only_panel = app.drive_memory_window()
+            assert read_only_panel.winfo_exists(), (
+                "Read-only Drive memory setup panel not available")
+            read_only_panel.destroy()
+            if getattr(sys, "frozen", False) and sys.platform == "win32":
+                import google_auth_oauthlib.flow
+                import google.auth.transport.requests
+                assert google_auth_oauthlib.flow.InstalledAppFlow
+                assert google.auth.transport.requests.AuthorizedSession
+            mark("after readonly Drive setup and packaged OAuth imports")
+            # The frozen installer must include pystray's native Windows backend,
+            # not merely compile the lazy-loading tray wrapper successfully.
+            if getattr(sys, "frozen", False) and sys.platform == "win32":
+                import pystray
+                from pystray import _win32 as tray_win32
+                assert pystray.Icon and tray_win32, (
+                    "Frozen app has no native Windows notification-area backend")
+            # Never hide the app unless a healthy system tray can restore it.
+            # Fake readiness tests Tk's actual withdraw/deiconify lifecycle
+            # without running a shell tray host in CI.
+            root.deiconify()
+            root.update_idletasks()
+            app.tray._ready.set()
+            app._hide_to_tray()
+            assert root.state() == "withdrawn", (
+                "Close/minimise must hide Milo, not destroy it")
+            assert not app._exiting and app.db.db is not None, (
+                "Minimisation unexpectedly shut down Milo's database")
+            app._restore_from_tray()
+            assert root.state() in ("normal", "zoomed"), (
+                "Open Milo from tray did not restore the desktop")
+            app.tray._ready.clear()
+            assert root.protocol("WM_DELETE_WINDOW"), (
+                "Close button must have a non-destructive tray handler")
+            mark("after minimize-to-tray and restore")
+            # The real images must load from bundled installation paths,
+            # not just exist as placeholder names in the database.
+            from PIL import Image as PillowImage
+            for internal_id, alias, display in (
+                ("research", "sage", "Sage"),
+                ("webdev", "nova", "Nova"),
+                ("gamedev", "forge", "Forge"),
+            ):
+                bot = get_bot(app.db.db, internal_id)
+                assert bot is not None and bot.name == display, (
+                    "Specialist identity migration failed: " + alias)
+                avatar = app._bot_avatar_path(bot)
+                assert avatar and avatar.is_file(), (
+                    "Bundled " + alias + " image missing in native app")
+                with PillowImage.open(avatar) as portrait:
+                    portrait.verify()
+                target, stripped = resolve_target(
+                    app.db.db, "@" + alias + " hello",
+                    ChatSettings("avatar-smoke"))
+                assert target == internal_id and stripped == "hello", (
+                    "Mention routing failed for @" + alias)
+            mark("after bundled specialist avatars and mention routing")
+            # Exercise the ACTUAL native menu command after the popup handler
+            # returns. Previous code destroyed this menu immediately, so a
+            # right-click visibly offered Delete but never ran the action.
+            delete_events = []
+            prior_delete = app.chat_list._on_delete
+            try:
+                app.chat_list._on_delete = delete_events.append
+                app.chat_list._menu_chat_id = "synthetic-test-chat"
+                assert app.chat_list._delete_menu.winfo_exists()
+                app.chat_list._delete_menu.invoke(0)
+                root.update_idletasks()
+                root.update()
+                assert delete_events == ["synthetic-test-chat"], (
+                    "Delete menu command was not dispatched")
+                assert app.chat_list._delete_menu.winfo_exists(), (
+                    "Menu destroyed prematurely")
+            finally:
+                app.chat_list._on_delete = prior_delete
+                app.chat_list._menu_chat_id = None
+            mark("after native delete menu regression")
             app.models_window()
             app.updates_modules_window()
             assert app.bot_side.winfo_exists(), "bot roster sidebar missing"
@@ -3023,6 +4497,26 @@ def ui_self_test() -> int:
             app.documents_window("core")  # local Core Knowledge panel must open
             assert app.core_docs_button.winfo_exists(), "Core Knowledge button missing"
             assert app.attachment_status.winfo_exists(), "Attachment UI missing"
+            app.show_quick_chat()
+            assert app.quick_popup.winfo_exists(), "Quick-chat overlay missing"
+            app.quick_popup.destroy()
+            app.quick_popup = None
+            activity = app.activity_window()
+            assert activity.winfo_exists(), "Tool activity viewer missing"
+            activity.destroy()
+            windows_tools = app.windows_tools_window()
+            assert windows_tools.winfo_exists(), "Windows action picker missing"
+            windows_tools.destroy()
+            organiser = app.organise_files_window()
+            assert organiser.winfo_exists(), "File organiser preview missing"
+            organiser.destroy()
+            settings_panel = app.settings_window()
+            assert settings_panel is None or settings_panel.winfo_exists()
+            # Settings can open without activating vision or network access.
+            mark("after optional vision and file tools UI")
+            app._audit("quick_chat", "completed")
+            assert list_activity(app.db.db)[0][1:] == (
+                "quick_chat", "completed"), "Activity log did not persist"
             if TkinterDnD is not None:
                 assert app.drop_ready, "Native file drag and drop is not active"
             assert get_bot(app.db.db, "research") is not None
@@ -3087,6 +4581,32 @@ def ui_self_test() -> int:
             mark("before update")
             root.update()
             mark("after update")
+            # Regression for 0.9.4: the oversized Tk composer swallowed the
+            # Send/Stop actions and consumed nearly 90px with an empty input.
+            assert int(app.entry.cget("height")) == 1, (
+                "Empty composer must start at one row")
+            assert app.entry.winfo_height() < 52, (
+                "Empty composer is too tall")
+            assert app.send_button.winfo_ismapped(), (
+                "Send button was pushed offscreen")
+            assert app.stop_button.winfo_ismapped(), (
+                "Stop button was pushed offscreen")
+            parent = app.entry.master
+            right = parent.winfo_rootx() + parent.winfo_width()
+            for button in (app.send_button, app.stop_button):
+                assert button.winfo_rootx() + button.winfo_width() <= right, (
+                    "Composer action button extends outside visible area")
+            app._composer_focus_in(None)
+            app.entry.insert("1.0", "Line one\nLine two")
+            app._resize_composer()
+            assert 2 <= int(app.entry.cget("height")) <= 4, (
+                "Multiline input must expand within its cap")
+            app.entry.delete("1.0", "end")
+            app._show_composer_hint()
+            app._resize_composer()
+            assert int(app.entry.cget("height")) == 1, (
+                "Composer did not shrink back after clearing")
+            mark("after compact composer regression")
             for child in list(root.winfo_children()):
                 if isinstance(child, tk.Toplevel):
                     child.destroy()

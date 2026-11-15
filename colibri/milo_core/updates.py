@@ -13,16 +13,19 @@ from pathlib import Path
 import re
 import os
 import shutil
+import socket
+import ssl
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-CURRENT_VERSION = "0.8.0"
+CURRENT_VERSION = "0.9.8"
 REPOSITORY = "BoomForge/colibri"
 RELEASES_API = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
 MAX_INSTALLER = 500 * 1024 * 1024
 MAX_MODULE = 70 * 1024 * 1024
-UA = "Milo-Personal-Assistant-Updater/0.8"
+UA = "Milo-Personal-Assistant-Updater/0.9"
 _SEMVER = re.compile(r"^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$")
 _SAFE_ASSET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,120}$")
 
@@ -41,21 +44,73 @@ def newer(candidate: str, installed: str = CURRENT_VERSION) -> bool:
     return version_parts(candidate) > version_parts(installed)
 
 
+def _github_error(exc: Exception) -> str:
+    """Actionable but privacy-safe failures; never log URLs or credentials."""
+    if isinstance(exc, HTTPError):
+        code = exc.code
+        if code in (403, 429):
+            remaining = exc.headers.get("X-RateLimit-Remaining", "")
+            if remaining == "0":
+                return ("GitHub API rate limit reached (HTTP " + str(code) +
+                        "). Try again later or open the releases webpage.")
+            return ("GitHub refused the updater request (HTTP " + str(code) +
+                    "). Check firewall/proxy filtering of api.github.com.")
+        if code == 404:
+            return ("GitHub returned HTTP 404 for the pinned Milo repository. "
+                    "Check that github.com and api.github.com are accessible.")
+        if code >= 500:
+            return ("GitHub's release API is temporarily unavailable (HTTP " +
+                    str(code) + "). Retry later.")
+        return "GitHub release API returned HTTP " + str(code)
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    if isinstance(reason, ssl.SSLError):
+        return ("TLS certificate verification failed. Check your Windows clock, "
+                "security software and trusted certificates; do not disable TLS checks.")
+    if isinstance(reason, socket.gaierror):
+        return ("DNS could not resolve api.github.com. Check your internet "
+                "connection and DNS settings.")
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return ("Connection to api.github.com timed out. Check your connection, "
+                "firewall or VPN, or open releases in a browser.")
+    if isinstance(reason, ConnectionRefusedError):
+        return ("A network/proxy connection refused the GitHub request. "
+                "Check VPN, proxy and firewall settings.")
+    return ("The updater could not connect to api.github.com securely. "
+            "Try the releases webpage in your browser; no update was installed.")
+
+
+def _is_temporary(exc: Exception) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code in (429, 500, 502, 503, 504)
+    return isinstance(exc, (URLError, TimeoutError, OSError))
+
+
 def _json_https(url: str, *, max_bytes: int = 1024 * 1024):
-    if not url.startswith("https://api.github.com/repos/BoomForge/colibri/"):
+    # Match a fixed repo path, not an arbitrary prefix that could include
+    # another host or unexpected endpoint.
+    if url != RELEASES_API:
         raise UpdateError("untrusted release API address")
-    request = Request(url, headers={"User-Agent": UA, "Accept": "application/vnd.github+json"})
-    try:
-        with urlopen(request, timeout=15) as response:
-            content = response.read(max_bytes + 1)
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        raise UpdateError("cannot reach GitHub Releases") from exc
+    request = Request(url, headers={
+        "User-Agent": UA,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    for attempt in range(2):
+        try:
+            with urlopen(request, timeout=15) as response:
+                content = response.read(max_bytes + 1)
+            break
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            if attempt == 0 and _is_temporary(exc):
+                time.sleep(0.5)
+                continue
+            raise UpdateError(_github_error(exc)) from exc
     if len(content) > max_bytes:
         raise UpdateError("GitHub response exceeded size limit")
     try:
         return json.loads(content)
     except (json.JSONDecodeError, UnicodeError) as exc:
-        raise UpdateError("invalid GitHub Releases metadata") from exc
+        raise UpdateError("GitHub Releases returned invalid JSON") from exc
 
 
 def latest_milo_release() -> dict | None:

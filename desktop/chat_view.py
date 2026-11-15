@@ -445,6 +445,15 @@ class ConversationList(tk.Frame):
         super().__init__(parent, bg=bg)
         self._on_select = on_select
         self._on_delete = on_delete
+        # Persistent menu: Tk's tk_popup() returns after posting, not after
+        # the user chooses a command. Destroying it in the popup's finally
+        # block made "Delete conversation" silently do nothing on Windows.
+        self._menu_chat_id = None
+        self._delete_menu = tk.Menu(
+            self, tearoff=False, bg=COLORS["header"],
+            fg=COLORS["text"], activebackground=COLORS["selected"])
+        self._delete_menu.add_command(
+            label="Delete conversation…", command=self._queue_delete)
         self.avatars = AvatarBank()
         self.avatar = None
         self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
@@ -463,25 +472,31 @@ class ConversationList(tk.Frame):
         self.canvas.bind("<MouseWheel>", lambda e:
                          self.canvas.yview_scroll(-int(e.delta / 120 or 1), "units"))
 
+    def _queue_delete(self):
+        """Dismiss the popup before the confirmation dialog starts."""
+        chat_id = self._menu_chat_id
+        if self._on_delete is not None and chat_id is not None:
+            # Defer until Tk has finished processing the menu selection.
+            self.after_idle(self._on_delete, chat_id)
+
     def _conversation_menu(self, event, chat_id):
         if self._on_delete is None:
             return
-        menu = tk.Menu(self, tearoff=False,
-                       bg=COLORS["header"], fg=COLORS["text"],
-                       activebackground=COLORS["selected"])
-        menu.add_command(label="Delete conversation…",
-                         command=lambda: self._on_delete(chat_id))
+        self._menu_chat_id = chat_id
         try:
-            menu.tk_popup(event.x_root, event.y_root)
+            self._delete_menu.tk_popup(event.x_root, event.y_root)
         finally:
-            menu.grab_release()
-            menu.destroy()
+            self._delete_menu.grab_release()
+        # Do not destroy the menu here: tk_popup() is non-blocking on
+        # Windows. The same menu survives until the sidebar is destroyed.
 
     def set_avatar(self, path):
         self.avatar = path
         self.avatars = AvatarBank()
 
-    def set_chats(self, chats, selected):
+    def set_chats(self, chats, selected, avatar_by_chat=None):
+        """Each private DM may display a different specialist portrait."""
+        avatar_by_chat = avatar_by_chat or {}
         for widget in self.inner.winfo_children():
             widget.destroy()
         self.rows = {}
@@ -492,7 +507,9 @@ class ConversationList(tk.Frame):
             row.pack(fill="x", padx=(7, 6), pady=2)
             tk.Frame(row, bg=COLORS["milo"] if active else bg,
                      width=3).pack(side="left", fill="y")
-            image = avatar_widget(row, self.avatars, self.avatar, "M",
+            portrait = avatar_by_chat.get(chat_id) or self.avatar
+            fallback = (title.lstrip("#@ ").strip() or "M")[:1].upper()
+            image = avatar_widget(row, self.avatars, portrait, fallback,
                                   COLORS["milo"], size=28, background=bg)
             image.pack(side="left", padx=(8, 9), pady=7)
             clean_title = title.strip().replace("\n", " ")
