@@ -50,6 +50,15 @@ from desktop.screen_capture import capture_primary_screen, ScreenCaptureError
 from desktop.tray_service import MiloTray
 from colibri.milo_core.consultation import prepare_consultation
 from colibri.milo_core.conversation import MiloConversation, MiloProfile
+from colibri.milo_core.drive_memory import (
+    DriveMemoryError, SOL_FOLDER, SOL_NAME,
+    connected as drive_connected, connect as drive_connect,
+    disconnect as drive_disconnect, refresh as drive_refresh,
+    load_config as drive_load_config, save_config as drive_save_config,
+    root_id as drive_root_id, cache_path as drive_cache_path,
+    read_index as drive_read_index, search_memory as drive_search_memory,
+    model_context as drive_model_context,
+)
 from colibri.milo_core.filesystem import find_files_by_prefix
 from colibri.milo_core.file_operations import (
     FileMoveError, plan_file_moves, execute_file_moves,
@@ -273,6 +282,8 @@ class MiloDesktop:
         self.cancel = threading.Event()
         self.model_download_cancel = threading.Event()
         self.model_download_active = False
+        self.drive_task_active = False
+        self.drive_panel_refresh = None
         self.models: list[str] = []
         self.images = {}
         self.release_candidate = None
@@ -351,6 +362,7 @@ class MiloDesktop:
             ("Updates & modules", self.updates_modules_window, None),
             ("Tool activity", self.activity_window, None),
             ("Memory", self.memory_window, "memory"),
+            ("Google Drive memory", self.drive_memory_window, "drive_memory"),
             ("Restore Milo personality", self.restore_milo_personality, "memory"),
             ("Find files", self.find_files_window, "files"),
             ("Organise files", self.organise_files_window, "files"),
@@ -2361,6 +2373,35 @@ class MiloDesktop:
                     sources = search_public_web(research_query)
                     research_context = source_context(sources)
                     answer_suffix = source_footer(sources)
+                # This searches a user-refreshed, encrypted local index:
+                # no Google API traffic is initiated by an ordinary chat.
+                if target_id == "milo" and module_enabled(DATA_DIR, "drive_memory"):
+                    drive_intent = any(
+                        term in clean_prompt.casefold() for term in
+                        ("google drive", "drive docs", "drive memory",
+                         "our project files", "sol archive", "reference library"))
+                    if drive_connected(DATA_DIR):
+                        try:
+                            matches = drive_search_memory(DATA_DIR, clean_prompt)
+                            source_text, source_links = drive_model_context(matches)
+                            if source_text:
+                                actual_context += "\n\n" + source_text
+                                answer_suffix += source_links
+                            elif drive_intent:
+                                actual_context += (
+                                    "\n\nNo verified source matches in the "
+                                    "last local Google Drive reference snapshot. "
+                                    "Do not invent the missing information.")
+                        except DriveMemoryError:
+                            actual_context += (
+                                "\n\nDrive memory index could not be read; "
+                                "ask the owner to refresh it. Do not claim "
+                                "that its contents were verified.")
+                    elif drive_intent:
+                        actual_context += (
+                            "\n\nGoogle Drive is NOT connected on this PC. "
+                            "Ask the owner to open Setup & modules > "
+                            "Google Drive memory.")
                 with LocalMemoryStore(DB_PATH) as store:
                     provider = LocalOpenAIProvider(
                         model=model, base_url=self.active_base_url)
@@ -2651,6 +2692,22 @@ class MiloDesktop:
                     self.check_connection()
                 elif kind == "model_import_error":
                     messagebox.showerror("Model import", event[1])
+                elif kind == "drive_memory_event":
+                    self.drive_task_active = False
+                    action, succeeded, message = event[1:4]
+                    self._audit("drive_memory_"+action,
+                                "completed" if succeeded else "failed")
+                    if callable(self.drive_panel_refresh):
+                        try:
+                            self.drive_panel_refresh()
+                        except tk.TclError:
+                            pass
+                    if succeeded:
+                        messagebox.showinfo(
+                            "Google Drive memory", message, parent=self.root)
+                    else:
+                        messagebox.showerror(
+                            "Google Drive memory", message, parent=self.root)
                 elif kind == "pc_app_search_result":
                     self._complete_pc_app_search(
                         event[1], event[2], event[3], event[4])
